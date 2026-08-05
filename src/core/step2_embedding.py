@@ -107,9 +107,8 @@ class DinoEmbedder:
 
 
 if __name__ == "__main__":
-    # Test paths based on the established folder structure
-    INPUT_FOLDER = "../../data/deduplicated"
-    OUTPUT_FOLDER = "../../data/embeddings"
+    INPUT_FOLDER = "data/deduplicated"
+    OUTPUT_FOLDER = "data/embeddings"
     
     embedder = DinoEmbedder(input_dir=INPUT_FOLDER, output_dir=OUTPUT_FOLDER)
     embedder.process_images()
