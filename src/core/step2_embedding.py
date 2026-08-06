@@ -1,8 +1,8 @@
 """
 Module: step2_embedding
-Description: Extracts semantic features from deduplicated images using the state-of-the-art 
-             DINOv3 Base model and stores the output embeddings as .npy files. 
-             These embeddings are essential for fast similarity searches in the pipeline.
+Description: Extracts semantic features from images using DINOv3 Base.
+             Loads the model from a local safetensors file to bypass network blocks,
+             saves individual embeddings, and merges them into a VDB.
 """
 
 import os
@@ -13,11 +13,12 @@ import numpy as np
 import torch
 from PIL import Image
 from torchvision import transforms
+from safetensors.torch import load_file
 
 
 class DinoEmbedder:
     """
-    Loads a DINOv3 Base vision model and extracts embeddings from images.
+    Loads a local DINOv3 Base vision model and extracts embeddings from images.
 
     Attributes:
         input_dir (Path): Directory containing the deduplicated images.
@@ -28,14 +29,6 @@ class DinoEmbedder:
     """
 
     def __init__(self, input_dir: str, output_dir: str, device: Optional[str] = None) -> None:
-        """
-        Initializes the DinoEmbedder, sets up the compute device, and loads the DINOv3 Base model.
-
-        Args:
-            input_dir (str): Path to deduplicated source images.
-            output_dir (str): Path to store the resulting .npy embeddings.
-            device (Optional[str]): Force 'cpu' or 'cuda'. If None, auto-detects.
-        """
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
         
@@ -48,9 +41,21 @@ class DinoEmbedder:
             
         print(f"[*] Compute device selected: {self.device}")
 
-        # Loading the DINOv3 Base model directly from Meta's repository
-        print("[*] Loading DINOv3 Base (vitb14) model from torch hub...")
-        self.model = torch.hub.load("facebookresearch/dinov3", "dinov3_vitb14")
+        # Download the architecture skeleton from PyTorch Hub (pretrained=False disables weight downloading)
+        print("[*] Loading DINOv3 Base (vitb16) architecture from torch hub...")
+        self.model = torch.hub.load("facebookresearch/dinov3", "dinov3_vitb16", pretrained=False)
+        
+        # Load the downloaded weights from the local safetensors file
+        local_model_path = "data/models/dinov3_vitb16.safetensors"
+        print(f"[*] Loading local model weights from {local_model_path}...")
+        
+        if not os.path.exists(local_model_path):
+            raise FileNotFoundError(f"[!] Model file not found at {local_model_path}. Please download it and place it in the models directory.")
+            
+        # Safely load the state_dict using safetensors
+        state_dict = load_file(local_model_path, device="cpu")
+        self.model.load_state_dict(state_dict, strict=False)
+        
         self.model.to(self.device)
         self.model.eval()
 
@@ -65,16 +70,13 @@ class DinoEmbedder:
     def process_images(self) -> None:
         """
         Iterates over the input directory, processes each image through the DINOv3 model,
-        and saves the resulting feature vector as a .npy file.
+        and saves the resulting feature vector as an individual .npy file.
+        Finally, it triggers the creation of the vector database.
         """
-        try:
-            image_files = [
-                f for f in os.listdir(self.input_dir) 
-                if f.lower().endswith(('.png', '.jpg', '.jpeg'))
-            ]
-        except FileNotFoundError:
-            print(f"[!] Error: The input directory {self.input_dir} does not exist.")
-            return
+        image_files = [
+            f for f in os.listdir(self.input_dir) 
+            if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+        ]
 
         if not image_files:
             print(f"[-] No images found in {self.input_dir} to process.")
@@ -87,7 +89,6 @@ class DinoEmbedder:
             npy_filename = f"{os.path.splitext(img_name)[0]}.npy"
             npy_path = self.output_dir / npy_filename
 
-            # Skip if the embedding already exists (allows resuming interrupted processes)
             if npy_path.exists():
                 continue
 
@@ -102,8 +103,30 @@ class DinoEmbedder:
 
             except Exception as e:
                 print(f"[!] Failed to process {img_name}. Error: {e}")
+        
+        print("[+] Individual embeddings saved. Creating single VDB file...")
+        self.create_vector_database()
 
-        print(f"[+] Task finished successfully. Embeddings are stored in {self.output_dir}.")
+    def create_vector_database(self) -> None:
+        """
+        Merges all individual .npy files into a single vector database file (.npz)
+        for incredibly fast similarity searches in the next pipeline steps.
+        """
+        all_embeddings = {}
+        
+        npy_files = [
+            f for f in os.listdir(self.output_dir) 
+            if f.endswith('.npy') and f != "embeddings_db.npz"
+        ]
+        
+        for npy_file in npy_files:
+            img_key = npy_file.replace('.npy', '')
+            emb_array = np.load(self.output_dir / npy_file)
+            all_embeddings[img_key] = emb_array
+            
+        db_path = self.output_dir / "embeddings_db.npz"
+        np.savez_compressed(db_path, **all_embeddings)
+        print(f"[+] Master Vector Database created successfully at: {db_path}")
 
 
 if __name__ == "__main__":
