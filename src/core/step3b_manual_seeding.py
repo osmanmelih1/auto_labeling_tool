@@ -1,102 +1,117 @@
 """
-Module: utils_manual_seeder
-Description: Interactive SAM Seeder for Fallback (Path B). 
-             Opens a UI window for the user to click on the target object 
-             in the seed image, then generates and saves the mask.
+Module: step3b_manual_seeding.py
+Description: Reads the bounding box coordinates and class ID from the GUI's JSON file,
+             feeds it to the Segment Anything Model (SAM) as a box prompt, 
+             and generates a perfect YOLO format label and mask.
 """
 
 import os
-from pathlib import Path
-
-import matplotlib.pyplot as plt
-import numpy as np
+import json
 import torch
-from PIL import Image
+import numpy as np
+import cv2
 from segment_anything import sam_model_registry, SamPredictor
 
+def main():
+    print("[*] Starting Manual Seeding (Bounding Box Prompt)...")
+    
+    # 1. Load Data from GUI (JSON File)
+    seed_file = "data/temp_seed.json"
+    if not os.path.exists(seed_file):
+        print("[!] Error: No seed data found. Please draw and confirm a box in the GUI first.")
+        return
 
-class InteractiveSamSeeder:
-    def __init__(self, model_path: str, model_type: str = "vit_b", device: str = None) -> None:
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"[*] Initializing SAM ({model_type}) on {self.device}...")
+    # Read the JSON file created by app.py
+    with open(seed_file, "r") as f:
+        data = json.load(f)
 
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"[!] SAM model not found at {model_path}")
-
-        self.sam = sam_model_registry[model_type](checkpoint=model_path)
-        self.sam.to(device=self.device)
-        self.predictor = SamPredictor(self.sam)
-
-    def select_point_and_generate_mask(self, image_path: str, output_path: str) -> None:
-        """
-        Displays the image, waits for user to click on the target object, 
-        generates the mask based on that coordinate, and saves it.
-        """
-        print(f"\n[*] Loading seed image: {image_path}")
-        image_pil = Image.open(image_path).convert("RGB")
-        image_np = np.array(image_pil)
-
-        self.predictor.set_image(image_np)
-
-        # 1. Interactive UI for Point Selection
-        print("[*] PLEASE LOOK AT THE POP-UP WINDOW.")
-        print("[*] Click once on the object you want to label (e.g., a pallet or box).")
+    img_path = data["image_path"]
+    class_id = data["class_id"]
+    x, y, w, h = data["bbox"]
+    
+    print(f"[*] Loaded seed for image: {os.path.basename(img_path)}")
+    print(f"[*] Box Coordinates: X:{x}, Y:{y}, W:{w}, H:{h} | Class ID: {class_id}")
+    
+    # 2. Initialize SAM Model
+    # Make sure the model exists in the data/models/ directory.
+    sam_checkpoint = "data/models/sam_vit_b_01ec64.pth"
+    model_type = "vit_b"
+    device = "cpu"  # Can be changed to "cuda" if a compatible GPU is available
+    
+    print(f"[*] Initializing SAM ({model_type}) on {device}...")
+    try:
+        sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
+        sam.to(device=device)
+        predictor = SamPredictor(sam)
+    except Exception as e:
+        print(f"[!] Error loading SAM model: {e}")
+        print(f"[!] Please ensure the model weights exist at: {sam_checkpoint}")
+        return
+    
+    # 3. Read and Prepare the Image
+    image = cv2.imread(img_path)
+    if image is None:
+        print(f"[!] Error: Could not read image from {img_path}")
+        return
         
-        fig, ax = plt.subplots(figsize=(10, 8))
-        ax.imshow(image_np)
-        ax.set_title("CLICK ON THE TARGET OBJECT (Wait for UI to close automatically)")
-        ax.axis('off')
+    # Convert BGR (OpenCV default) to RGB (SAM requirement)
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    predictor.set_image(image_rgb)
+    
+    # 4. Format Bounding Box for SAM
+    # SAM expects the box in [x_min, y_min, x_max, y_max] format
+    input_box = np.array([x, y, x + w, y + h])
+    
+    print("[*] Generating mask using bounding box prompt...")
+    masks, scores, _ = predictor.predict(
+        point_coords=None,
+        point_labels=None,
+        box=input_box[None, :],
+        multimask_output=False,
+    )
+    
+    mask = masks[0]
+    score = scores[0]
+    
+    print(f"[+] Mask generated with confidence score: {score:.4f}")
+    
+    # 5. Convert Mask to YOLO Format
+    # Find contours to get the exact bounding box of the generated mask
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if contours:
+        # Get the largest contour in case of minor artifacts
+        c = max(contours, key=cv2.contourArea)
+        mx, my, mw, mh = cv2.boundingRect(c)
+        img_h, img_w = mask.shape
         
-        # Get one click from the user
-        clicked_points = plt.ginput(1, timeout=-1)
-        plt.close(fig)
-
-        if not clicked_points:
-            print("[-] No point selected. Exiting.")
-            return
-
-        target_x, target_y = int(clicked_points[0][0]), int(clicked_points[0][1])
-        center_point = np.array([[target_x, target_y]])
-        point_labels = np.array([1])  # Foreground
-
-        print(f"\n[*] Generating mask for user coordinate: [X:{target_x}, Y:{target_y}]")
+        # Normalize coordinates for YOLO (center_x, center_y, width, height)
+        center_x = (mx + mw / 2.0) / img_w
+        center_y = (my + mh / 2.0) / img_h
+        norm_w = mw / img_w
+        norm_h = mh / img_h
         
-        # 2. Predict the mask
-        masks, scores, logits = self.predictor.predict(
-            point_coords=center_point,
-            point_labels=point_labels,
-            multimask_output=False,
-        )
-
-        mask_array = masks[0]
-        mask_img = Image.fromarray((mask_array * 255).astype(np.uint8))
-
-        # 3. Save the mask
-        output_dir = Path(output_path).parent
-        output_dir.mkdir(parents=True, exist_ok=True)
-        mask_img.save(output_path)
+        # Setup output paths
+        base_name = os.path.splitext(os.path.basename(img_path))[0]
+        os.makedirs("data/labels", exist_ok=True)
+        label_path = f"data/labels/{base_name}.txt"
         
-        print(f"[+] Mask generated with confidence score: {scores[0]:.4f}")
-        print(f"[+] Mask saved successfully to: {output_path}")
-
+        # Write to YOLO .txt file
+        with open(label_path, "w") as f:
+            f.write(f"{class_id} {center_x:.6f} {center_y:.6f} {norm_w:.6f} {norm_h:.6f}\n")
+            
+        print(f"[+] Perfect YOLO label saved to: {label_path}")
+        
+        # Save Mask Image for visual verification and Step 4 (Propagation)
+        os.makedirs("data/masks", exist_ok=True)
+        mask_path = f"data/masks/seed_mask_{base_name}.jpg"
+        mask_img = (mask * 255).astype(np.uint8)
+        cv2.imwrite(mask_path, mask_img)
+        print(f"[+] Mask saved successfully to: {mask_path}")
+    else:
+        print("[!] Warning: No contours found in the generated mask.")
+        
+    print("\n[+] Process finished successfully.")
 
 if __name__ == "__main__":
-    MODEL_PATH = "data/models/sam_vit_b_01ec64.pth"
-    INPUT_DIR = "data/deduplicated"
-    OUTPUT_DIR = "data/masks"
-
-    try:
-        image_files = [f for f in os.listdir(INPUT_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-        
-        if image_files:
-            test_image_name = image_files[0]
-            test_image_path = os.path.join(INPUT_DIR, test_image_name)
-            test_output_path = os.path.join(OUTPUT_DIR, f"seed_mask_{test_image_name}")
-
-            seeder = InteractiveSamSeeder(model_path=MODEL_PATH)
-            seeder.select_point_and_generate_mask(image_path=test_image_path, output_path=test_output_path)
-        else:
-            print(f"[-] No images found in {INPUT_DIR}.")
-            
-    except Exception as e:
-        print(f"[!] An error occurred: {e}")
+    main()
