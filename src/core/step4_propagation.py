@@ -1,9 +1,9 @@
 """
 Module: step4_propagation
-Description: Similarity-based Propagation (Path B).
-             Loads the Master VDB (embeddings_db.npz), takes a seed image,
+Description: Similarity-based Label Propagation (Path B).
+             Loads the Master VDB (embeddings_db.npz), takes a seed image that has a YOLO label,
              finds the most visually similar images using Cosine Similarity,
-             and prepares them for the next labeling phase.
+             and automatically propagates (copies) the YOLO label to those similar images.
 """
 
 import os
@@ -19,7 +19,6 @@ class VDBPropagator:
         if not os.path.exists(vdb_path):
             raise FileNotFoundError(f"[!] VDB not found at {vdb_path}. Run Step 2 first.")
         
-        # Load the .npz file into memory
         self.database = np.load(vdb_path)
         self.image_names = self.database.files
         print(f"[+] Loaded embeddings for {len(self.image_names)} images.")
@@ -35,19 +34,26 @@ class VDBPropagator:
             
         return dot_product / (norm_a * norm_b)
 
-    def find_similar_images(self, query_image_name: str, top_k: int = 5):
-        """Finds the top_k most similar images to the query image."""
+    def propagate_labels(self, query_image_name: str, label_dir: str, threshold: float = 0.95):
+        """Finds similar images and automatically applies the YOLO label to them."""
         # Strip extension to match VDB keys
         query_key = query_image_name.replace('.jpg', '').replace('.png', '').replace('.jpeg', '')
+        seed_label_path = os.path.join(label_dir, f"{query_key}.txt")
         
         if query_key not in self.image_names:
             print(f"[-] Query image '{query_key}' not found in VDB.")
-            return []
+            return
+            
+        if not os.path.exists(seed_label_path):
+            print(f"[-] Seed label not found: {seed_label_path}")
+            print("[-] Please run Step 3 (Text or Manual) to generate the initial label first.")
+            return
 
-        print(f"\n[*] Starting similarity search for seed: {query_key}")
+        print(f"\n[*] Starting label propagation for seed: {query_key}")
         query_embedding = self.database[query_key]
+        
+        propagated_count = 0
 
-        results = {}
         # Compare the seed against all other images in the database
         for img_key in self.image_names:
             if img_key == query_key:
@@ -55,50 +61,38 @@ class VDBPropagator:
             
             emb = self.database[img_key]
             score = self.cosine_similarity(query_embedding, emb)
-            results[img_key] = score
-
-        # Sort by highest similarity
-        sorted_results = sorted(results.items(), key=lambda item: item[1], reverse=True)
-        top_results = sorted_results[:top_k]
-
-        print(f"\n[+] Top {len(top_results)} most similar images found:")
-        for rank, (img_name, score) in enumerate(top_results, 1):
-            print(f"    {rank}. {img_name} (Similarity: {score:.4f})")
             
-        return top_results
+            # If similarity is very high, propagate the label
+            if score >= threshold:
+                target_label_path = os.path.join(label_dir, f"{img_key}.txt")
+                shutil.copy2(seed_label_path, target_label_path)
+                print(f"  [+] Propagated label to: {img_key}.txt (Similarity: {score:.4f})")
+                propagated_count += 1
+                
+        print(f"\n[+] Propagation complete! Successfully labeled {propagated_count} similar images automatically.")
 
 
 if __name__ == "__main__":
     VDB_PATH = "data/embeddings/embeddings_db.npz"
     INPUT_DIR = "data/deduplicated"
-    OUTPUT_DIR = "data/similar_results"
+    LABEL_DIR = "data/labels"
     
     try:
         # Get the first image as our test seed
         image_files = [f for f in os.listdir(INPUT_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
         
-        if not image_files:
-            print(f"[-] No images found in {INPUT_DIR}.")
-        else:
+        if image_files:
             test_seed = image_files[0]
-            
             propagator = VDBPropagator(vdb_path=VDB_PATH)
-            # Find the top 3 most similar images (since we only have 7 images total in test, 3 is a good number)
-            similar_items = propagator.find_similar_images(query_image_name=test_seed, top_k=3)
             
-            # Copy these similar images to a new folder so we can visually inspect them
-            os.makedirs(OUTPUT_DIR, exist_ok=True)
-            print(f"\n[*] Copying top results to {OUTPUT_DIR} for visual inspection...")
-            
-            for img_key, score in similar_items:
-                for ext in ['.jpg', '.jpeg', '.png']:
-                    src_path = os.path.join(INPUT_DIR, img_key + ext)
-                    if os.path.exists(src_path):
-                        dst_path = os.path.join(OUTPUT_DIR, f"{score:.2f}_{img_key}{ext}")
-                        shutil.copy2(src_path, dst_path)
-                        break
-            
-            print(f"[+] Done! Check the '{OUTPUT_DIR}' folder to see if AI found visually similar scenes.")
+            # Use a strict threshold of 95% similarity
+            propagator.propagate_labels(
+                query_image_name=test_seed, 
+                label_dir=LABEL_DIR, 
+                threshold=0.95
+            )
+        else:
+            print(f"[-] No images found in {INPUT_DIR}.")
             
     except Exception as e:
         print(f"[!] An error occurred: {e}")
