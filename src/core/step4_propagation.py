@@ -1,26 +1,17 @@
 """
 Module: step4_propagation.py
-Description: Confidence-Tiered Similarity-based Label Propagation (Path B).
-             Loads the Master VDB (embeddings_db.npz), reads the verified seed image
-             from temp_seed.json (created by GUI), finds visually similar images,
-             and propagates the YOLO label into THREE confidence tiers instead of a
-             single blind threshold:
+Description: Multi-Seed Confidence-Tiered Label Propagation (Path B).
+             Loads the Master VDB and scans the 'data/labels' directory to identify ALL 
+             existing labeled images (the Seed Pool). It then compares every unlabelled 
+             image against ALL seeds in the pool, finds the best match (highest cosine 
+             similarity), and propagates the YOLO label based on Confidence Tiers.
 
-               - AUTO-ACCEPT  (score >= AUTO_ACCEPT_THRESHOLD):
-                   Label is copied directly. Treated as production-ready ground truth.
+             This creates an "Avalanche Effect" for Active Learning: 
+             10 seeds -> prop -> 150 labels -> prop -> 1500 labels.
 
-               - REVIEW QUEUE (REVIEW_THRESHOLD <= score < AUTO_ACCEPT_THRESHOLD):
-                   Label is copied as a DRAFT (so downstream steps still see a .txt file),
-                   but the image is also registered in data/review_queue.json so a human
-                   can confirm or reject it in the GUI before it reaches the final dataset.
-
-               - REJECTED (score < REVIEW_THRESHOLD):
-                   Nothing is copied, nothing is tracked. Too dissimilar to trust.
-
-             Rationale: blindly trusting everything above 0.85 risks false positives near
-             the boundary. Splitting into tiers keeps full automation for high-confidence
-             matches while routing borderline cases to human review instead of silently
-             poisoning the dataset.
+               - AUTO-ACCEPT  (score >= 0.92)
+               - REVIEW QUEUE (0.82 <= score < 0.92)
+               - REJECTED     (score < 0.82)
 """
 
 import os
@@ -29,7 +20,7 @@ import json
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, List, Tuple
 
 # --- Confidence Tier Configuration ---
 AUTO_ACCEPT_THRESHOLD = 0.92   # >= this score: direct automatic acceptance
@@ -41,8 +32,7 @@ IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
 
 
 def resolve_image_path(image_dir: str, image_key: str) -> Optional[str]:
-    """Finds the actual image file path for a given extensionless image_key.
-    Required by the Review GUI to display image thumbnails."""
+    """Finds the actual image file path for a given extensionless image_key."""
     for ext in IMAGE_EXTENSIONS:
         candidate = os.path.join(image_dir, image_key + ext)
         if os.path.exists(candidate):
@@ -60,8 +50,8 @@ class VDBPropagator:
         self.vdb_path = vdb_path
         self.review_queue_path = Path(review_queue_path)
         self.image_dir = image_dir
+        
         print(f"[*] Loading Master VDB from {vdb_path}...")
-
         if not os.path.exists(vdb_path):
             raise FileNotFoundError(f"[!] VDB not found at {vdb_path}. Run Step 2 first.")
 
@@ -74,14 +64,11 @@ class VDBPropagator:
         dot_product = np.dot(vec_a, vec_b)
         norm_a = np.linalg.norm(vec_a)
         norm_b = np.linalg.norm(vec_b)
-
         if norm_a == 0 or norm_b == 0:
             return 0.0
-
         return dot_product / (norm_a * norm_b)
 
     def _load_review_queue(self) -> dict:
-        """Loads data/review_queue.json. Starts fresh if missing or corrupt."""
         if self.review_queue_path.exists():
             with open(self.review_queue_path, "r") as f:
                 try:
@@ -95,65 +82,68 @@ class VDBPropagator:
         with open(self.review_queue_path, "w") as f:
             json.dump(queue_data, f, indent=2)
 
-    def propagate_labels(
-        self,
-        query_image_name: str,
-        label_dir: str,
-        auto_threshold: float = AUTO_ACCEPT_THRESHOLD,
-        review_threshold: float = REVIEW_THRESHOLD,
-    ):
-        """Finds similar images and routes the YOLO label into confidence tiers."""
-        query_key = query_image_name.replace(".jpg", "").replace(".png", "").replace(".jpeg", "")
-        seed_label_path = os.path.join(label_dir, f"{query_key}.txt")
+    def propagate_all_seeds(self, label_dir: str):
+        """Multi-Seed Propagation: Uses all existing labels as seeds to label the rest."""
+        print(f"\n[*] Scanning for existing seeds in {label_dir}...")
+        
+        seed_pool: List[Tuple[str, np.ndarray, str]] = []
+        target_pool: List[Tuple[str, np.ndarray, str]] = []
 
-        if query_key not in self.image_names:
-            print(f"[-] Query image '{query_key}' not found in VDB.")
+        # 1. Separate images into Seeds (has label) and Targets (no label)
+        for img_key in self.image_names:
+            label_path = os.path.join(label_dir, f"{img_key}.txt")
+            emb = self.database[img_key]
+            
+            if os.path.exists(label_path):
+                seed_pool.append((img_key, emb, label_path))
+            else:
+                target_pool.append((img_key, emb, label_path))
+
+        if not seed_pool:
+            print("[-] No seeds found! Please run Step 3a or 3b first to create at least one label.")
             return
 
-        if not os.path.exists(seed_label_path):
-            print(f"[-] Seed label not found: {seed_label_path}")
-            print("[-] Please run Step 3 (Text or Manual) to generate the initial label first.")
-            return
+        print(f"[+] Found {len(seed_pool)} active seeds in the pool.")
+        print(f"[*] Attempting to propagate labels to {len(target_pool)} unlabelled images...")
+        print(f"[*] Thresholds -> AUTO-ACCEPT: >= {AUTO_ACCEPT_THRESHOLD} | REVIEW: >= {REVIEW_THRESHOLD}")
 
-        print(f"\n[*] Starting confidence-tiered propagation for seed: {query_key}")
-        print(
-            f"[*] Thresholds -> AUTO-ACCEPT: >= {auto_threshold} | "
-            f"REVIEW: >= {review_threshold} | REJECTED: < {review_threshold}"
-        )
-
-        query_embedding = self.database[query_key]
         review_queue = self._load_review_queue()
-
         auto_count = 0
         review_count = 0
         rejected_count = 0
 
-        for img_key in self.image_names:
-            if img_key == query_key:
-                continue
+        # 2. Compare each Target against ALL Seeds to find the best match
+        for target_key, target_emb, target_label_path in target_pool:
+            best_score = -1.0
+            best_seed_key = None
+            best_seed_label_path = None
 
-            emb = self.database[img_key]
-            score = self.cosine_similarity(query_embedding, emb)
-            target_label_path = os.path.join(label_dir, f"{img_key}.txt")
+            for seed_key, seed_emb, seed_label_path in seed_pool:
+                score = self.cosine_similarity(target_emb, seed_emb)
+                if score > best_score:
+                    best_score = score
+                    best_seed_key = seed_key
+                    best_seed_label_path = seed_label_path
 
-            if score >= auto_threshold:
-                shutil.copy2(seed_label_path, target_label_path)
-                review_queue["pending"].pop(img_key, None)
-                print(f"  [AUTO]   {img_key} -> Score: {score:.4f} | Directly accepted.")
+            # 3. Apply Confidence Tier logic to the BEST match
+            if best_score >= AUTO_ACCEPT_THRESHOLD:
+                shutil.copy2(best_seed_label_path, target_label_path)
+                review_queue["pending"].pop(target_key, None)
+                print(f"  [AUTO]   {target_key} -> Matched with '{best_seed_key}' | Score: {best_score:.4f}")
                 auto_count += 1
 
-            elif score >= review_threshold:
-                shutil.copy2(seed_label_path, target_label_path)
-                review_queue["pending"][img_key] = {
-                    "score": round(float(score), 4),
-                    "seed_source": query_key,
+            elif best_score >= REVIEW_THRESHOLD:
+                shutil.copy2(best_seed_label_path, target_label_path)
+                review_queue["pending"][target_key] = {
+                    "score": round(float(best_score), 4),
+                    "seed_source": best_seed_key,
                     "label_path": os.path.abspath(target_label_path),
-                    "image_path": resolve_image_path(self.image_dir, img_key),
-                    "image_key": img_key,
+                    "image_path": resolve_image_path(self.image_dir, target_key),
+                    "image_key": target_key,
                     "flagged_at": datetime.now(timezone.utc).isoformat(),
                     "status": "pending_review",
                 }
-                print(f"  [REVIEW] {img_key} -> Score: {score:.4f} | Draft label copied, AWAITING APPROVAL.")
+                print(f"  [REVIEW] {target_key} -> Matched with '{best_seed_key}' | Score: {best_score:.4f} (AWAITING APPROVAL)")
                 review_count += 1
 
             else:
@@ -161,36 +151,22 @@ class VDBPropagator:
 
         self._save_review_queue(review_queue)
 
-        print(f"\n[+] Propagation complete for seed '{query_key}':")
-        print(f"    - Auto-accepted : {auto_count}")
-        print(f"    - Review queue  : {review_count}  (see {self.review_queue_path})")
-        print(f"    - Rejected      : {rejected_count}")
+        print("\n[+] Multi-Seed Propagation Complete:")
+        print(f"    - Base Seeds Used : {len(seed_pool)}")
+        print(f"    - Auto-accepted   : {auto_count}")
+        print(f"    - Review queue    : {review_count} (see {self.review_queue_path})")
+        print(f"    - Rejected        : {rejected_count}")
+        
         if review_count > 0:
-            print(
-                f"[!] {review_count} image(s) awaiting human approval. "
-                f"Open the 'Review Queue' screen in the GUI to accept/reject them."
-            )
+            print(f"[!] {review_count} image(s) awaiting human approval in the GUI 'Review Queue'.")
 
 
 if __name__ == "__main__":
     VDB_PATH = "data/embeddings/embeddings_db.npz"
     LABEL_DIR = "data/labels"
-    SEED_FILE = "data/temp_seed.json"
 
     try:
-        if not os.path.exists(SEED_FILE):
-            print(f"[!] Error: Seed file not found at {SEED_FILE}.")
-            print("[!] Please use the GUI to draw a bounding box and confirm it first.")
-        else:
-            with open(SEED_FILE, "r") as f:
-                seed_data = json.load(f)
-
-            actual_seed_image = os.path.basename(seed_data["image_path"])
-            propagator = VDBPropagator(vdb_path=VDB_PATH)
-            propagator.propagate_labels(
-                query_image_name=actual_seed_image,
-                label_dir=LABEL_DIR,
-            )
-
+        propagator = VDBPropagator(vdb_path=VDB_PATH)
+        propagator.propagate_all_seeds(label_dir=LABEL_DIR)
     except Exception as e:
         print(f"[!] An error occurred: {e}")

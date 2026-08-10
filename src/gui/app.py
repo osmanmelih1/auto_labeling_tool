@@ -852,16 +852,26 @@ class AutoLabelingApp(QMainWindow):
         self.log_textbox.ensureCursorVisible()
 
     def run_script(self, script_path):
-        # Prevent running 3a if prompt is empty
         if "step3a" in script_path:
             prompt_text = self.prompt_input.text().strip()
             if not prompt_text:
                 self.append_log("[-] Warning: Prompt box is empty! Please type a prompt (e.g., 'box') before running Step 3a.\n")
                 return
+            if not self.current_image_path:
+                self.append_log("[-] Warning: No image loaded! Please load an image first.\n")
+                return
+            
+            # Extract class ID dynamically from the UI
+            selected_class_text = self.class_combo.currentText()
+            class_id = int(selected_class_text.split(" - ")[0])
             
             os.makedirs("data", exist_ok=True)
             with open("data/current_prompt.json", "w") as f:
-                json.dump({"prompt": prompt_text}, f)
+                json.dump({
+                    "prompt": prompt_text, 
+                    "image_path": self.current_image_path,
+                    "class_id": class_id
+                }, f)
             self.append_log(f"[*] Prompt saved for Step 3a: '{prompt_text}'\n")
 
         self.append_log(f"\n[{'='*40}]\n")
