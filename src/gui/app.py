@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QLabel, QFrame, QSplitter, QFileDialog,
     QGraphicsView, QGraphicsScene, QComboBox, QDialog, QScrollArea,
-    QMessageBox, QProgressBar
+    QMessageBox, QProgressBar, QLineEdit
 )
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QPoint, QRect, QRectF, QPointF
 from PyQt6.QtGui import QPixmap, QPen, QColor, QPainter
@@ -726,6 +726,7 @@ class AutoLabelingApp(QMainWindow):
             QPushButton#reviewBtn:hover { background-color: #dc6502; }
             QComboBox { background-color: #3b3b3b; color: white; border: 1px solid #555; padding: 5px; border-radius: 3px; font-size: 14px; margin: 5px 10px; }
             QComboBox::drop-down { border: 0px; }
+            QLineEdit { background-color: #3b3b3b; color: white; border: 1px solid #555; padding: 6px; border-radius: 3px; font-size: 14px; margin: 5px 10px; }
         """)
 
         sidebar_layout = QVBoxLayout(sidebar_frame)
@@ -736,8 +737,13 @@ class AutoLabelingApp(QMainWindow):
         sidebar_layout.addWidget(logo_label)
 
         self.class_combo = QComboBox()
-        self.class_combo.addItems(["0 - Box (Koli)", "1 - Pallet (Palet)", "2 - Other"])
+        self.class_combo.addItems(["0 - Box", "1 - Pallet", "2 - Other"])
         sidebar_layout.addWidget(self.class_combo)
+
+        # --- TEXT PROMPT INPUT ---
+        self.prompt_input = QLineEdit()
+        self.prompt_input.setPlaceholderText("Enter prompt (e.g., box)")
+        sidebar_layout.addWidget(self.prompt_input)
 
         self.btn_load = QPushButton("Load Image")
         self.btn_load.setObjectName("loadBtn")
@@ -846,6 +852,18 @@ class AutoLabelingApp(QMainWindow):
         self.log_textbox.ensureCursorVisible()
 
     def run_script(self, script_path):
+        # Prevent running 3a if prompt is empty
+        if "step3a" in script_path:
+            prompt_text = self.prompt_input.text().strip()
+            if not prompt_text:
+                self.append_log("[-] Warning: Prompt box is empty! Please type a prompt (e.g., 'box') before running Step 3a.\n")
+                return
+            
+            os.makedirs("data", exist_ok=True)
+            with open("data/current_prompt.json", "w") as f:
+                json.dump({"prompt": prompt_text}, f)
+            self.append_log(f"[*] Prompt saved for Step 3a: '{prompt_text}'\n")
+
         self.append_log(f"\n[{'='*40}]\n")
         self.append_log(f"[*] Executing: {script_path}\n")
 

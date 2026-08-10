@@ -1,5 +1,5 @@
 """
-Module: step3_text_prompting
+Module: step3a_text_prompting.py
 Description: Zero-Shot Text Prompting (Path A).
              Uses Grounding DINO to find objects based on a text prompt,
              passes the bounding boxes to SAM for precise masking,
@@ -7,6 +7,7 @@ Description: Zero-Shot Text Prompting (Path A).
 """
 
 import os
+import json
 from pathlib import Path
 
 import numpy as np
@@ -57,7 +58,7 @@ class TextToMaskPipeline:
 
         return x_center, y_center, box_width, box_height
 
-    def generate_mask_from_text(self, image_path: str, text_prompt: str, mask_output_path: str, label_output_path: str, box_threshold: float = 0.3, text_threshold: float = 0.3):
+    def generate_mask_from_text(self, image_path: str, text_prompt: str, mask_output_path: str, label_output_path: str, class_id: int = 0, box_threshold: float = 0.3, text_threshold: float = 0.3):
         print(f"\n[*] Processing image: {image_path}")
         print(f"[*] Searching for: '{text_prompt}'")
         
@@ -115,7 +116,6 @@ class TextToMaskPipeline:
         
         if yolo_coords:
             x_c, y_c, w, h = yolo_coords
-            class_id = 0 # Default class ID for the target object
             yolo_line = f"{class_id} {x_c:.6f} {y_c:.6f} {w:.6f} {h:.6f}\n"
 
             Path(label_output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -130,32 +130,52 @@ class TextToMaskPipeline:
 
 if __name__ == "__main__":
     SAM_MODEL_PATH = "data/models/sam_vit_b_01ec64.pth"
-    INPUT_DIR = "data/deduplicated"
     MASK_DIR = "data/masks"
     LABEL_DIR = "data/labels"
     
-    PROMPT = "brown cardboard box on a wooden pallet." 
+    SEED_FILE = "data/temp_seed.json"
+    PROMPT_FILE = "data/current_prompt.json"
 
     try:
-        image_files = [f for f in os.listdir(INPUT_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-        
-        if image_files:
-            test_image = image_files[0]
-            test_img_path = os.path.join(INPUT_DIR, test_image)
+        # 1. Ensure the GUI has provided an image and a prompt
+        if not os.path.exists(SEED_FILE):
+            print(f"[!] Error: Seed file missing. Please load an image in the GUI first.")
+            exit(1)
             
-            test_mask_path = os.path.join(MASK_DIR, f"mask_{test_image}")
-            txt_filename = test_image.rsplit('.', 1)[0] + '.txt'
-            test_label_path = os.path.join(LABEL_DIR, txt_filename)
+        if not os.path.exists(PROMPT_FILE):
+            print(f"[!] Error: Prompt file missing. Please enter a prompt in the GUI.")
+            exit(1)
 
-            pipeline = TextToMaskPipeline(sam_model_path=SAM_MODEL_PATH)
-            pipeline.generate_mask_from_text(
-                image_path=test_img_path, 
-                text_prompt=PROMPT, 
-                mask_output_path=test_mask_path,
-                label_output_path=test_label_path
-            )
-        else:
-            print(f"[-] No images found in {INPUT_DIR}.")
+        # 2. Read the dynamic data
+        with open(SEED_FILE, "r") as f:
+            seed_data = json.load(f)
+            
+        with open(PROMPT_FILE, "r") as f:
+            prompt_data = json.load(f)
+
+        target_image_path = seed_data.get("image_path")
+        target_class_id = seed_data.get("class_id", 0)
+        text_prompt = prompt_data.get("prompt", "")
+
+        if not target_image_path or not os.path.exists(target_image_path):
+            print(f"[!] Error: Target image not found at {target_image_path}")
+            exit(1)
+
+        # 3. Construct output paths based on the loaded image
+        image_filename = os.path.basename(target_image_path)
+        test_mask_path = os.path.join(MASK_DIR, f"mask_{image_filename}")
+        txt_filename = image_filename.rsplit('.', 1)[0] + '.txt'
+        test_label_path = os.path.join(LABEL_DIR, txt_filename)
+
+        # 4. Run the pipeline
+        pipeline = TextToMaskPipeline(sam_model_path=SAM_MODEL_PATH)
+        pipeline.generate_mask_from_text(
+            image_path=target_image_path, 
+            text_prompt=text_prompt, 
+            mask_output_path=test_mask_path,
+            label_output_path=test_label_path,
+            class_id=target_class_id
+        )
             
     except Exception as e:
         print(f"[!] An error occurred: {e}")
