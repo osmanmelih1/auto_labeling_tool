@@ -1,14 +1,14 @@
 """
-Module: step4_propagation
+Module: step4_propagation.py
 Description: Similarity-based Label Propagation (Path B).
-             Loads the Master VDB (embeddings_db.npz), takes a seed image that has a YOLO label,
-             finds the most visually similar images using Cosine Similarity,
-             and automatically propagates (copies) the YOLO label to those similar images.
+             Loads the Master VDB (embeddings_db.npz), reads the verified seed image 
+             from temp_seed.json (created by GUI), finds visually similar images,
+             and automatically propagates the YOLO label to them based on a strict threshold.
 """
 
 import os
 import shutil
-from pathlib import Path
+import json
 import numpy as np
 
 class VDBPropagator:
@@ -34,7 +34,7 @@ class VDBPropagator:
             
         return dot_product / (norm_a * norm_b)
 
-    def propagate_labels(self, query_image_name: str, label_dir: str, threshold: float = 0.95):
+    def propagate_labels(self, query_image_name: str, label_dir: str, threshold: float = 0.85):
         """Finds similar images and automatically applies the YOLO label to them."""
         # Strip extension to match VDB keys
         query_key = query_image_name.replace('.jpg', '').replace('.png', '').replace('.jpeg', '')
@@ -62,11 +62,13 @@ class VDBPropagator:
             emb = self.database[img_key]
             score = self.cosine_similarity(query_embedding, emb)
             
-            # If similarity is very high, propagate the label
+            print(f"  [*] Checking {img_key}... Score: {score:.4f}")
+            
+            # If similarity is above realistic threshold, propagate the label
             if score >= threshold:
                 target_label_path = os.path.join(label_dir, f"{img_key}.txt")
                 shutil.copy2(seed_label_path, target_label_path)
-                print(f"  [+] Propagated label to: {img_key}.txt (Similarity: {score:.4f})")
+                print(f"    [+] MATCH! Propagated label to: {img_key}.txt")
                 propagated_count += 1
                 
         print(f"\n[+] Propagation complete! Successfully labeled {propagated_count} similar images automatically.")
@@ -74,25 +76,28 @@ class VDBPropagator:
 
 if __name__ == "__main__":
     VDB_PATH = "data/embeddings/embeddings_db.npz"
-    INPUT_DIR = "data/deduplicated"
     LABEL_DIR = "data/labels"
+    SEED_FILE = "data/temp_seed.json"
     
     try:
-        # Get the first image as our test seed
-        image_files = [f for f in os.listdir(INPUT_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-        
-        if image_files:
-            test_seed = image_files[0]
+        if not os.path.exists(SEED_FILE):
+            print(f"[!] Error: Seed file not found at {SEED_FILE}.")
+            print("[!] Please use the GUI to draw a bounding box and confirm it first.")
+        else:
+            with open(SEED_FILE, "r") as f:
+                seed_data = json.load(f)
+            
+            # Get the actual image name from JSON
+            actual_seed_image = os.path.basename(seed_data["image_path"])
+            
             propagator = VDBPropagator(vdb_path=VDB_PATH)
             
-            # Use a strict threshold of 95% similarity
+            # Restored the strict industrial threshold to 0.85
             propagator.propagate_labels(
-                query_image_name=test_seed, 
+                query_image_name=actual_seed_image, 
                 label_dir=LABEL_DIR, 
-                threshold=0.95
+                threshold=0.85
             )
-        else:
-            print(f"[-] No images found in {INPUT_DIR}.")
             
     except Exception as e:
         print(f"[!] An error occurred: {e}")

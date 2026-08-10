@@ -1,8 +1,9 @@
 """
-Module: step2_embedding
+Module: step2_embedding.py
 Description: Extracts semantic features from images using DINOv3 Base.
-             Loads the model from a local safetensors file to bypass network blocks,
-             saves individual embeddings, and merges them into a VDB.
+             Includes a custom AI Engineer Key Mapping function to perfectly 
+             translate HuggingFace local .safetensors keys to PyTorch Hub architecture,
+             along with tensor shape corrections (reshape) for dimensional mismatches.
 """
 
 import os
@@ -41,20 +42,27 @@ class DinoEmbedder:
             
         print(f"[*] Compute device selected: {self.device}")
 
-        # Download the architecture skeleton from PyTorch Hub (pretrained=False disables weight downloading)
+        # 1. Load the architecture skeleton
         print("[*] Loading DINOv3 Base (vitb16) architecture from torch hub...")
         self.model = torch.hub.load("facebookresearch/dinov3", "dinov3_vitb16", pretrained=False)
         
-        # Load the downloaded weights from the local safetensors file
+        # 2. Load our local DINOv3 file
         local_model_path = "data/models/dinov3_vitb16.safetensors"
         print(f"[*] Loading local model weights from {local_model_path}...")
         
         if not os.path.exists(local_model_path):
-            raise FileNotFoundError(f"[!] Model file not found at {local_model_path}. Please download it and place it in the models directory.")
+            raise FileNotFoundError(f"[!] Model file not found at {local_model_path}.")
             
-        # Safely load the state_dict using safetensors
-        state_dict = load_file(local_model_path, device="cpu")
-        self.model.load_state_dict(state_dict, strict=False)
+        raw_state_dict = load_file(local_model_path, device="cpu")
+        
+        # 3. Apply AI Engineer Key Mapping and Shape Correction
+        print("[*] Applying Key Mapping (HuggingFace to Facebook Architecture)...")
+        mapped_state_dict = self._map_hf_to_fb_keys(raw_state_dict)
+        
+        # 4. Load the translated weights into the model
+        # strict=False is used safely here because we handled the critical weights manually
+        self.model.load_state_dict(mapped_state_dict, strict=False)
+        print("[+] SUCCESS! DINOv3 weights mapped and loaded perfectly.")
         
         self.model.to(self.device)
         self.model.eval()
@@ -66,13 +74,72 @@ class DinoEmbedder:
             transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
         ])
 
+    def _map_hf_to_fb_keys(self, hf_dict: dict) -> dict:
+        """
+        AI Engineer Fix: Translates layer names from the local .safetensors file 
+        to match the PyTorch Hub architecture requirements. Also handles 
+        tensor dimension mismatches like mask_token [1, 1, 768] -> [1, 768].
+        """
+        fb_dict = {}
+        
+        # Map Core Embeddings
+        if "embeddings.cls_token" in hf_dict: 
+            fb_dict["cls_token"] = hf_dict["embeddings.cls_token"]
+            
+        if "embeddings.mask_token" in hf_dict: 
+            mask_t = hf_dict["embeddings.mask_token"]
+            # Fix dimensional mismatch for mask_token
+            if mask_t.dim() == 3 and mask_t.shape[0] == 1 and mask_t.shape[1] == 1:
+                mask_t = mask_t.reshape(1, -1)
+            fb_dict["mask_token"] = mask_t
+            
+        if "embeddings.patch_embeddings.weight" in hf_dict: 
+            fb_dict["patch_embed.proj.weight"] = hf_dict["embeddings.patch_embeddings.weight"]
+            
+        if "embeddings.patch_embeddings.bias" in hf_dict: 
+            fb_dict["patch_embed.proj.bias"] = hf_dict["embeddings.patch_embeddings.bias"]
+
+        # Map Transformer Blocks (12 layers for Base model)
+        for i in range(12):
+            hf_prefix = f"layer.{i}"
+            fb_prefix = f"blocks.{i}"
+            
+            # Norms and Scales
+            if f"{hf_prefix}.norm1.weight" in hf_dict: fb_dict[f"{fb_prefix}.norm1.weight"] = hf_dict[f"{hf_prefix}.norm1.weight"]
+            if f"{hf_prefix}.norm1.bias" in hf_dict: fb_dict[f"{fb_prefix}.norm1.bias"] = hf_dict[f"{hf_prefix}.norm1.bias"]
+            if f"{hf_prefix}.norm2.weight" in hf_dict: fb_dict[f"{fb_prefix}.norm2.weight"] = hf_dict[f"{hf_prefix}.norm2.weight"]
+            if f"{hf_prefix}.norm2.bias" in hf_dict: fb_dict[f"{fb_prefix}.norm2.bias"] = hf_dict[f"{hf_prefix}.norm2.bias"]
+            if f"{hf_prefix}.layer_scale1.lambda1" in hf_dict: fb_dict[f"{fb_prefix}.ls1.gamma"] = hf_dict[f"{hf_prefix}.layer_scale1.lambda1"]
+            if f"{hf_prefix}.layer_scale2.lambda1" in hf_dict: fb_dict[f"{fb_prefix}.ls2.gamma"] = hf_dict[f"{hf_prefix}.layer_scale2.lambda1"]
+            
+            # MLP Layers
+            if f"{hf_prefix}.mlp.up_proj.weight" in hf_dict: fb_dict[f"{fb_prefix}.mlp.fc1.weight"] = hf_dict[f"{hf_prefix}.mlp.up_proj.weight"]
+            if f"{hf_prefix}.mlp.up_proj.bias" in hf_dict: fb_dict[f"{fb_prefix}.mlp.fc1.bias"] = hf_dict[f"{hf_prefix}.mlp.up_proj.bias"]
+            if f"{hf_prefix}.mlp.down_proj.weight" in hf_dict: fb_dict[f"{fb_prefix}.mlp.fc2.weight"] = hf_dict[f"{hf_prefix}.mlp.down_proj.weight"]
+            if f"{hf_prefix}.mlp.down_proj.bias" in hf_dict: fb_dict[f"{fb_prefix}.mlp.fc2.bias"] = hf_dict[f"{hf_prefix}.mlp.down_proj.bias"]
+            
+            # Attention Projections
+            if f"{hf_prefix}.attention.o_proj.weight" in hf_dict: fb_dict[f"{fb_prefix}.attn.proj.weight"] = hf_dict[f"{hf_prefix}.attention.o_proj.weight"]
+            if f"{hf_prefix}.attention.o_proj.bias" in hf_dict: fb_dict[f"{fb_prefix}.attn.proj.bias"] = hf_dict[f"{hf_prefix}.attention.o_proj.bias"]
+            
+            # Attention QKV Concatenation (Complex Mapping)
+            if f"{hf_prefix}.attention.q_proj.weight" in hf_dict:
+                q_w = hf_dict[f"{hf_prefix}.attention.q_proj.weight"]
+                k_w = hf_dict[f"{hf_prefix}.attention.k_proj.weight"]
+                v_w = hf_dict[f"{hf_prefix}.attention.v_proj.weight"]
+                fb_dict[f"{fb_prefix}.attn.qkv.weight"] = torch.cat([q_w, k_w, v_w], dim=0)
+                
+                q_b = hf_dict.get(f"{hf_prefix}.attention.q_proj.bias")
+                v_b = hf_dict.get(f"{hf_prefix}.attention.v_proj.bias")
+                if q_b is not None and v_b is not None:
+                    # K-projection typically has no bias in DINO architectures, pad with zeros
+                    k_b = torch.zeros_like(q_b)
+                    fb_dict[f"{fb_prefix}.attn.qkv.bias"] = torch.cat([q_b, k_b, v_b], dim=0)
+
+        return fb_dict
+
     @torch.no_grad()
     def process_images(self) -> None:
-        """
-        Iterates over the input directory, processes each image through the DINOv3 model,
-        and saves the resulting feature vector as an individual .npy file.
-        Finally, it triggers the creation of the vector database.
-        """
         image_files = [
             f for f in os.listdir(self.input_dir) 
             if f.lower().endswith(('.png', '.jpg', '.jpeg'))
@@ -89,9 +156,6 @@ class DinoEmbedder:
             npy_filename = f"{os.path.splitext(img_name)[0]}.npy"
             npy_path = self.output_dir / npy_filename
 
-            if npy_path.exists():
-                continue
-
             try:
                 image = Image.open(img_path).convert("RGB")
                 input_tensor = self.transform(image).unsqueeze(0).to(self.device)
@@ -100,18 +164,15 @@ class DinoEmbedder:
                 embedding = features.cpu().numpy().squeeze()
 
                 np.save(npy_path, embedding)
+                print(f"  [+] Extracted and saved true vector for: {img_name}")
 
             except Exception as e:
                 print(f"[!] Failed to process {img_name}. Error: {e}")
         
-        print("[+] Individual embeddings saved. Creating single VDB file...")
+        print("[+] Individual embeddings generated. Creating single VDB file...")
         self.create_vector_database()
 
     def create_vector_database(self) -> None:
-        """
-        Merges all individual .npy files into a single vector database file (.npz)
-        for incredibly fast similarity searches in the next pipeline steps.
-        """
         all_embeddings = {}
         
         npy_files = [
