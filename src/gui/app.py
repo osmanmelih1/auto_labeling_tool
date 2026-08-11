@@ -49,6 +49,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.core.class_config import class_color, class_name, load_classes, save_classes
+from src.core.review_queue import accept, clear_rejections, load_queue, reject, save_queue
 
 try:
     from src.core.step4_propagation import AUTO_ACCEPT_THRESHOLD, REVIEW_THRESHOLD
@@ -559,26 +560,19 @@ class ReviewQueueDialog(QDialog):
 
         self._build_ui()
         self._populate_cards()
+        self._update_rejected_label()
 
     def _load_queue(self) -> dict:
-        """Read the queue file, tolerating a missing or corrupt document.
+        """Read the queue file through the shared store.
 
         Returns:
-            dict: The queue, always containing a ``pending`` mapping.
+            dict: The queue, always containing ``pending`` and ``rejected``.
         """
-        if self.review_queue_path.exists():
-            try:
-                with open(self.review_queue_path) as f:
-                    return json.load(f)
-            except json.JSONDecodeError:
-                pass
-        return {"pending": {}}
+        return load_queue(str(self.review_queue_path))
 
     def _save_queue(self) -> None:
         """Write the queue back to disk after an accept or reject."""
-        self.review_queue_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.review_queue_path, "w") as f:
-            json.dump(self.queue_data, f, indent=2)
+        save_queue(self.queue_data, str(self.review_queue_path))
 
     def _build_ui(self):
         """Assemble the card list, sort control, bulk actions and preview pane."""
@@ -654,6 +648,24 @@ class ReviewQueueDialog(QDialog):
         bulk_layout.addWidget(bulk_accept_btn)
         bulk_layout.addWidget(bulk_reject_btn)
         left_panel.addLayout(bulk_layout)
+
+        rejected_row = QHBoxLayout()
+        self.rejected_label = QLabel("")
+        self.rejected_label.setStyleSheet("color:#999999; font-size:11px;")
+        rejected_row.addWidget(self.rejected_label, stretch=1)
+
+        clear_btn = QPushButton("Clear Rejection History")
+        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        clear_btn.setStyleSheet("""
+            QPushButton {
+                background-color:#3b3b3b; color:#cccccc; border:1px solid #555;
+                padding:6px 10px; border-radius:5px; font-size:11px;
+            }
+            QPushButton:hover { background-color:#4a4a4a; }
+        """)
+        clear_btn.clicked.connect(self._clear_rejections)
+        rejected_row.addWidget(clear_btn)
+        left_panel.addLayout(rejected_row)
 
         main_layout.addLayout(left_panel, stretch=2)
 
@@ -766,7 +778,7 @@ class ReviewQueueDialog(QDialog):
         Args:
             image_key: Key of the entry to accept.
         """
-        entry = self.queue_data.get("pending", {}).pop(image_key, None)
+        entry = accept(self.queue_data, image_key)
         if entry is None:
             return
         self.session_accepted += 1
@@ -775,15 +787,16 @@ class ReviewQueueDialog(QDialog):
         self._log(f"[+] Accepted: {image_key} (score: {entry.get('score')})")
 
     def _reject_one(self, image_key: str):
-        """Reject a queued label and delete the .txt file it produced.
+        """Reject a queued label, delete its .txt file and remember the rejection.
 
-        Deleting matters: a rejected label left on disk would be picked up as a
-        seed prototype by the next propagation run.
+        Deleting the label matters: one left on disk would be picked up as a seed
+        prototype by the next propagation run. Recording the rejection matters
+        just as much, otherwise the same image is proposed again on every run.
 
         Args:
             image_key: Key of the entry to reject.
         """
-        entry = self.queue_data.get("pending", {}).pop(image_key, None)
+        entry = reject(self.queue_data, image_key)
         if entry is None:
             return
         label_path = entry.get("label_path")
@@ -835,7 +848,7 @@ class ReviewQueueDialog(QDialog):
             return
 
         for key in keys:
-            self.queue_data["pending"].pop(key, None)
+            accept(self.queue_data, key)
         self.session_accepted += len(keys)
         self._save_queue()
         self._populate_cards()
@@ -850,14 +863,15 @@ class ReviewQueueDialog(QDialog):
             self,
             "Reject All",
             f"Are you sure you want to reject all {len(keys)} images?\n"
-            f"(All corresponding .txt label files will be deleted from disk.)",
+            "(Their .txt label files will be deleted and they will not be proposed "
+            "again unless a later run scores them clearly higher.)",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
 
         for key in keys:
-            entry = self.queue_data["pending"].pop(key, None)
+            entry = reject(self.queue_data, key)
             if entry:
                 label_path = entry.get("label_path")
                 if label_path and os.path.exists(label_path):
@@ -867,6 +881,38 @@ class ReviewQueueDialog(QDialog):
         self._save_queue()
         self._populate_cards()
         self._log(f"[-] {len(keys)} images rejected in bulk and labels deleted.")
+
+    def _clear_rejections(self):
+        """Forget every past rejection so those images can be proposed again.
+
+        Worth doing after the seed pool has grown substantially, when old
+        rejections say more about the prototypes of the time than about the
+        images themselves.
+        """
+        count = len(self.queue_data.get("rejected", {}))
+        if not count:
+            QMessageBox.information(self, "No Rejections", "Nothing has been rejected yet.")
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "Clear Rejection History",
+            f"Forget {count} past rejection(s)?\n\n"
+            "Those images will be proposed again by the next propagation run.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        cleared = clear_rejections(self.queue_data)
+        self._save_queue()
+        self._update_rejected_label()
+        self._log(f"[*] Cleared {cleared} rejection(s); they can be proposed again.")
+
+    def _update_rejected_label(self):
+        """Show how many images are currently suppressed by past rejections."""
+        count = len(self.queue_data.get("rejected", {}))
+        self.rejected_label.setText(f"{count} image(s) suppressed by past rejections" if count else "")
 
     def _log(self, message: str):
         """Forward a message to the main window's console, if there is one.

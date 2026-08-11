@@ -35,7 +35,6 @@ Input:  ``data/embeddings/patches/``, ``data/labels/`` (seeds), ``data/deduplica
 Output: ``data/labels/``, ``data/masks/``, ``data/review_queue.json``, ``data/debug/``
 """
 
-import json
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -45,6 +44,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 
+from src.core.review_queue import REVIEW_QUEUE_PATH, add_pending, is_suppressed, load_queue, save_queue
 from src.core.sam_engine import SamEngine, box_area, mask_to_yolo_box, yolo_box_to_pixels
 
 # --- Confidence Tier Configuration ---
@@ -70,7 +70,6 @@ PATCH_DIR = "data/embeddings/patches"
 IMAGE_DIR = "data/deduplicated"
 LABEL_DIR = "data/labels"
 MASK_DIR = "data/masks"
-REVIEW_QUEUE_PATH = "data/review_queue.json"
 DEBUG_DIR = "data/debug"
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
@@ -412,30 +411,6 @@ class PatchPropagator:
         except Exception as e:
             print(f"  [-] {image_key}: could not write debug overlay ({e}).")
 
-    def _load_review_queue(self) -> dict:
-        """Read the review queue, tolerating a corrupt or missing file.
-
-        Returns:
-            dict: The queue, always containing a ``pending`` mapping.
-        """
-        if self.review_queue_path.exists():
-            try:
-                with open(self.review_queue_path) as f:
-                    return json.load(f)
-            except json.JSONDecodeError:
-                print("[!] review_queue.json is corrupt, re-initialising.")
-        return {"pending": {}}
-
-    def _save_review_queue(self, queue: dict) -> None:
-        """Persist the review queue.
-
-        Args:
-            queue: The queue structure to write.
-        """
-        self.review_queue_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.review_queue_path, "w") as f:
-            json.dump(queue, f, indent=2)
-
     def propagate(self) -> None:
         """Locate every seeded class across all unlabelled images."""
         prototypes = self.build_prototypes()
@@ -456,8 +431,8 @@ class PatchPropagator:
         print(f"[*] Locating them in {len(targets)} unlabelled image(s).")
         print(f"[*] Tiers -> AUTO >= {AUTO_ACCEPT_THRESHOLD} | REVIEW >= {REVIEW_THRESHOLD}\n")
 
-        queue = self._load_review_queue()
-        auto = review = rejected = 0
+        queue = load_queue(str(self.review_queue_path))
+        auto = review = rejected = suppressed = 0
 
         for image_key in targets:
             grid = self.load_patch_grid(image_key)
@@ -466,6 +441,15 @@ class PatchPropagator:
             if score < REVIEW_THRESHOLD:
                 print(f"  [-]      {image_key} | {score:.4f} | below review threshold")
                 rejected += 1
+                continue
+
+            skip, previous = is_suppressed(queue, image_key, score)
+            if skip:
+                print(
+                    f"  [SKIP  ] {image_key} | {score:.4f} | already rejected at "
+                    f"{previous:.4f}, not improved enough to re-propose"
+                )
+                suppressed += 1
                 continue
 
             result = self.localize(image_key, heatmap)
@@ -487,20 +471,24 @@ class PatchPropagator:
             self.save_debug_overlay(image_key, heatmap, final_box, decision, score)
 
             if decision == "AUTO":
-                queue["pending"].pop(image_key, None)
+                queue.setdefault("pending", {}).pop(image_key, None)
                 auto += 1
             else:
-                queue["pending"][image_key] = {
-                    "score": round(score, 4),
-                    "seed_source": proto.image_key,
-                    "class_id": proto.class_id,
-                    "label_path": os.path.abspath(label_path),
-                    "image_path": resolve_image_path(self.image_dir, image_key),
-                    "image_key": image_key,
-                    "flagged_at": datetime.now(UTC).isoformat(),
-                    "status": "pending_review",
-                    "method": "patch_prototype_sam",
-                }
+                add_pending(
+                    queue,
+                    image_key,
+                    {
+                        "score": round(score, 4),
+                        "seed_source": proto.image_key,
+                        "class_id": proto.class_id,
+                        "label_path": os.path.abspath(label_path),
+                        "image_path": resolve_image_path(self.image_dir, image_key),
+                        "image_key": image_key,
+                        "flagged_at": datetime.now(UTC).isoformat(),
+                        "status": "pending_review",
+                        "method": "patch_prototype_sam",
+                    },
+                )
                 review += 1
 
             print(
@@ -508,13 +496,15 @@ class PatchPropagator:
                 f"box ({xc:.3f}, {yc:.3f}, {w:.3f}, {h:.3f}) | {note}"
             )
 
-        self._save_review_queue(queue)
+        save_queue(queue, str(self.review_queue_path))
 
         print("\n[+] Propagation complete:")
         print(f"    - Prototypes used : {len(prototypes)}")
         print(f"    - Auto-accepted   : {auto}")
         print(f"    - Review queue    : {review} (see {self.review_queue_path})")
         print(f"    - Rejected        : {rejected}")
+        if suppressed:
+            print(f"    - Skipped         : {suppressed} previously rejected by a human")
         print(f"[*] Heatmap overlays written to {self.debug_dir} for visual inspection.")
 
         if review:

@@ -43,11 +43,30 @@ data/raw/ ──[1]──> data/deduplicated/ ──[2]──> data/embeddings/e
 | 6 | `src/core/step5_export.py` | Packages the labels into a YOLO dataset and writes `data.yaml`. |
 | 7 | _planned_ | YOLO training on the exported dataset. |
 
-Two shared utilities sit outside the numbered steps:
+Three shared utilities sit outside the numbered steps:
 
 - `src/core/sam_engine.py` loads SAM once and converts prompts to masks and masks
   to YOLO boxes for whichever step needs it.
 - `src/core/class_config.py` reads and writes the project's class definitions.
+- `src/core/review_queue.py` defines the structure of `data/review_queue.json`,
+  which both the propagation step and the GUI read and write.
+
+### Rejections are remembered
+
+Propagation is run repeatedly as the seed pool grows. Without a record of what a
+human already turned down, every rejected image would be proposed again on every
+run — on a few thousand images that means rejecting the same wrong box over and
+over.
+
+Rejecting an entry therefore deletes its label file *and* records the score it
+was rejected at. Later runs skip it while its score stays within
+`REPROPOSE_MARGIN` (0.05) of that value. If a run scores it clearly higher, the
+seed pool has learned something new and the image is worth a second look, so it
+comes back.
+
+The Review Queue screen shows how many images are currently suppressed and has a
+**Clear Rejection History** button for when the seed pool has changed enough that
+old rejections say more about the prototypes of the time than about the images.
 
 ### Defining classes
 
