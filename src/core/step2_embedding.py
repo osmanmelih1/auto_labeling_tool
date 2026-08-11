@@ -1,8 +1,19 @@
-"""Module: step2_embedding.py
-Description: Extracts semantic features from images using DINOv3 Base.
-             Includes a custom AI Engineer Key Mapping function to perfectly
-             translate HuggingFace local .safetensors keys to PyTorch Hub architecture,
-             along with tensor shape corrections (reshape) for dimensional mismatches.
+"""Step 2 - DINOv3 Embedding Extraction (Master Vector Database).
+
+Loads the local DINOv3 ViT-B/16 checkpoint, translates its HuggingFace parameter
+names into the PyTorch Hub architecture layout, and extracts one feature vector
+per image into a single compressed vector database.
+
+The checkpoint is published by HuggingFace under names such as
+``layer.0.attention.q_proj.weight`` while the ``facebookresearch/dinov3`` hub
+architecture expects ``blocks.0.attn.qkv.weight``. The translation is therefore
+explicit, and - critically - verified: every parameter the model declares must be
+covered, otherwise the run aborts. Loading with ``strict=False`` and no
+verification silently leaves unmatched parameters at their random initialisation,
+which produces embeddings that look valid but carry no meaning.
+
+Input:  ``data/deduplicated/``
+Output: ``data/embeddings/<image>.npy`` and ``data/embeddings/embeddings_db.npz``
 """
 
 import os
@@ -14,154 +25,349 @@ from PIL import Image
 from safetensors.torch import load_file
 from torchvision import transforms
 
+MODEL_PATH = "data/models/dinov3_vitb16.safetensors"
+HUB_REPO = "facebookresearch/dinov3"
+HUB_ENTRYPOINT = "dinov3_vitb16"
+
+# Input images are resized to this square size. It must be a multiple of the
+# patch size (16). No centre crop is applied: cropping discards the edges of the
+# frame, and objects that live near the border would never reach the encoder.
+IMAGE_SIZE = 224
+PATCH_SIZE = 16
+
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
+VDB_FILENAME = "embeddings_db.npz"
+
+# Register (storage) tokens are named differently across DINO generations.
+REGISTER_TOKEN_CANDIDATES = ("storage_tokens", "register_tokens")
+
+# Buffers that the architecture derives at construction time rather than learning.
+# They are legitimately absent from the checkpoint and must NOT be treated as a
+# mapping failure:
+#   - rope_embed.periods : rotary position embedding frequencies, computed from
+#     the head dimension.
+#   - attn.qkv.bias_mask : DINOv3 fuses q/k/v into one Linear but has no bias on
+#     the key projection, so the layer keeps a constant 0/1 mask that zeroes the
+#     key slice of the fused bias. Its correctness is asserted in
+#     _verify_structural_buffers rather than assumed.
+NON_PERSISTENT_KEY_MARKERS = ("rope", "periods", "bias_mask")
+
+# Fused qkv layout is [query | key | value]; the key third carries no bias.
+QKV_PARTS = 3
+KEY_PART_INDEX = 1
+
 
 class DinoEmbedder:
-    """Loads a local DINOv3 Base vision model and extracts embeddings from images.
+    """Loads a local DINOv3 ViT-B/16 model and extracts embeddings from images.
 
     Attributes:
         input_dir (Path): Directory containing the deduplicated images.
         output_dir (Path): Directory where the .npy embeddings will be saved.
         device (torch.device): Compute device (CPU or CUDA).
-        model (torch.nn.Module): The pre-trained DINOv3 Base model.
+        model (torch.nn.Module): The pre-trained DINOv3 model in eval mode.
         transform (transforms.Compose): The image preprocessing pipeline.
     """
 
-    def __init__(self, input_dir: str, output_dir: str, device: str | None = None) -> None:
+    def __init__(
+        self,
+        input_dir: str,
+        output_dir: str,
+        device: str | None = None,
+        model_path: str = MODEL_PATH,
+    ) -> None:
+        """Build the embedder and load the local checkpoint into the hub architecture.
+
+        Args:
+            input_dir: Directory holding the deduplicated source images.
+            output_dir: Directory where embeddings and the vector database are written.
+            device: Explicit torch device string. Autodetected when omitted.
+            model_path: Path to the local DINOv3 .safetensors checkpoint.
+
+        Raises:
+            FileNotFoundError: If the checkpoint is missing.
+            RuntimeError: If any model parameter is left uninitialised after mapping.
+        """
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
-
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        if device:
-            self.device = torch.device(device)
-        else:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+        self.device = (
+            torch.device(device) if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        )
         print(f"[*] Compute device selected: {self.device}")
 
-        # 1. Load the architecture skeleton
-        print("[*] Loading DINOv3 Base (vitb16) architecture from torch hub...")
-        self.model = torch.hub.load("facebookresearch/dinov3", "dinov3_vitb16", pretrained=False)
+        print(f"[*] Loading DINOv3 architecture '{HUB_ENTRYPOINT}' from torch hub...")
+        self.model = torch.hub.load(HUB_REPO, HUB_ENTRYPOINT, pretrained=False)
 
-        # 2. Load our local DINOv3 file
-        local_model_path = "data/models/dinov3_vitb16.safetensors"
-        print(f"[*] Loading local model weights from {local_model_path}...")
+        print(f"[*] Loading local model weights from {model_path}...")
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"[!] Model file not found at {model_path}.")
+        raw_state_dict = load_file(model_path, device="cpu")
+        print(f"[+] Checkpoint contains {len(raw_state_dict)} tensors.")
 
-        if not os.path.exists(local_model_path):
-            raise FileNotFoundError(f"[!] Model file not found at {local_model_path}.")
+        print("[*] Translating HuggingFace parameter names to the hub architecture...")
+        mapped_state_dict = self._map_hf_to_hub_keys(raw_state_dict)
 
-        raw_state_dict = load_file(local_model_path, device="cpu")
-
-        # 3. Apply AI Engineer Key Mapping and Shape Correction
-        print("[*] Applying Key Mapping (HuggingFace to Facebook Architecture)...")
-        mapped_state_dict = self._map_hf_to_fb_keys(raw_state_dict)
-
-        # 4. Load the translated weights into the model
-        # strict=False is used safely here because we handled the critical weights manually
-        self.model.load_state_dict(mapped_state_dict, strict=False)
-        print("[+] SUCCESS! DINOv3 weights mapped and loaded perfectly.")
+        self._load_and_verify(mapped_state_dict)
 
         self.model.to(self.device)
         self.model.eval()
 
         self.transform = transforms.Compose(
             [
-                transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
-                transforms.CenterCrop(224),
+                transforms.Resize(
+                    (IMAGE_SIZE, IMAGE_SIZE),
+                    interpolation=transforms.InterpolationMode.BICUBIC,
+                ),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
             ]
         )
 
-    def _map_hf_to_fb_keys(self, hf_dict: dict) -> dict:
-        """AI Engineer Fix: Translates layer names from the local .safetensors file
-        to match the PyTorch Hub architecture requirements. Also handles
-        tensor dimension mismatches like mask_token [1, 1, 768] -> [1, 768].
+    def _map_hf_to_hub_keys(self, hf_dict: dict) -> dict:
+        """Translate HuggingFace checkpoint keys into hub architecture keys.
+
+        Separate q/k/v projections are concatenated into the single fused ``qkv``
+        tensor the hub blocks expect. DINOv3 attention has no bias on the key
+        projection, so its slice of the fused bias is zero-filled.
+
+        Args:
+            hf_dict: Raw state dict as stored in the .safetensors file.
+
+        Returns:
+            dict: State dict keyed by hub architecture parameter names.
         """
-        fb_dict = {}
+        model_keys = set(self.model.state_dict().keys())
+        hub_dict: dict = {}
 
-        # Map Core Embeddings
-        if "embeddings.cls_token" in hf_dict:
-            fb_dict["cls_token"] = hf_dict["embeddings.cls_token"]
+        # --- Top-level embeddings and the final normalisation layer ---
+        direct_map = {
+            "embeddings.cls_token": "cls_token",
+            "embeddings.mask_token": "mask_token",
+            "embeddings.patch_embeddings.weight": "patch_embed.proj.weight",
+            "embeddings.patch_embeddings.bias": "patch_embed.proj.bias",
+            "norm.weight": "norm.weight",
+            "norm.bias": "norm.bias",
+        }
+        for hf_key, hub_key in direct_map.items():
+            if hf_key in hf_dict:
+                hub_dict[hub_key] = hf_dict[hf_key]
 
-        if "embeddings.mask_token" in hf_dict:
-            mask_t = hf_dict["embeddings.mask_token"]
-            # Fix dimensional mismatch for mask_token
-            if mask_t.dim() == 3 and mask_t.shape[0] == 1 and mask_t.shape[1] == 1:
-                mask_t = mask_t.reshape(1, -1)
-            fb_dict["mask_token"] = mask_t
+        # Register / storage tokens: the target name varies between DINO releases.
+        if "embeddings.register_tokens" in hf_dict:
+            target = next((c for c in REGISTER_TOKEN_CANDIDATES if c in model_keys), None)
+            if target is None:
+                print(
+                    "[!] Warning: checkpoint has register tokens but the architecture "
+                    f"declares none of {REGISTER_TOKEN_CANDIDATES}. Skipping them."
+                )
+            else:
+                hub_dict[target] = hf_dict["embeddings.register_tokens"]
 
-        if "embeddings.patch_embeddings.weight" in hf_dict:
-            fb_dict["patch_embed.proj.weight"] = hf_dict["embeddings.patch_embeddings.weight"]
+        # --- Transformer blocks ---
+        layer_indices = sorted({int(key.split(".")[1]) for key in hf_dict if key.startswith("layer.")})
+        per_layer_map = {
+            "norm1.weight": "norm1.weight",
+            "norm1.bias": "norm1.bias",
+            "norm2.weight": "norm2.weight",
+            "norm2.bias": "norm2.bias",
+            "layer_scale1.lambda1": "ls1.gamma",
+            "layer_scale2.lambda1": "ls2.gamma",
+            "mlp.up_proj.weight": "mlp.fc1.weight",
+            "mlp.up_proj.bias": "mlp.fc1.bias",
+            "mlp.down_proj.weight": "mlp.fc2.weight",
+            "mlp.down_proj.bias": "mlp.fc2.bias",
+            "attention.o_proj.weight": "attn.proj.weight",
+            "attention.o_proj.bias": "attn.proj.bias",
+        }
 
-        if "embeddings.patch_embeddings.bias" in hf_dict:
-            fb_dict["patch_embed.proj.bias"] = hf_dict["embeddings.patch_embeddings.bias"]
-
-        # Map Transformer Blocks (12 layers for Base model)
-        for i in range(12):
+        for i in layer_indices:
             hf_prefix = f"layer.{i}"
-            fb_prefix = f"blocks.{i}"
+            hub_prefix = f"blocks.{i}"
 
-            # Norms and Scales
-            if f"{hf_prefix}.norm1.weight" in hf_dict:
-                fb_dict[f"{fb_prefix}.norm1.weight"] = hf_dict[f"{hf_prefix}.norm1.weight"]
-            if f"{hf_prefix}.norm1.bias" in hf_dict:
-                fb_dict[f"{fb_prefix}.norm1.bias"] = hf_dict[f"{hf_prefix}.norm1.bias"]
-            if f"{hf_prefix}.norm2.weight" in hf_dict:
-                fb_dict[f"{fb_prefix}.norm2.weight"] = hf_dict[f"{hf_prefix}.norm2.weight"]
-            if f"{hf_prefix}.norm2.bias" in hf_dict:
-                fb_dict[f"{fb_prefix}.norm2.bias"] = hf_dict[f"{hf_prefix}.norm2.bias"]
-            if f"{hf_prefix}.layer_scale1.lambda1" in hf_dict:
-                fb_dict[f"{fb_prefix}.ls1.gamma"] = hf_dict[f"{hf_prefix}.layer_scale1.lambda1"]
-            if f"{hf_prefix}.layer_scale2.lambda1" in hf_dict:
-                fb_dict[f"{fb_prefix}.ls2.gamma"] = hf_dict[f"{hf_prefix}.layer_scale2.lambda1"]
+            for hf_suffix, hub_suffix in per_layer_map.items():
+                hf_key = f"{hf_prefix}.{hf_suffix}"
+                if hf_key in hf_dict:
+                    hub_dict[f"{hub_prefix}.{hub_suffix}"] = hf_dict[hf_key]
 
-            # MLP Layers
-            if f"{hf_prefix}.mlp.up_proj.weight" in hf_dict:
-                fb_dict[f"{fb_prefix}.mlp.fc1.weight"] = hf_dict[f"{hf_prefix}.mlp.up_proj.weight"]
-            if f"{hf_prefix}.mlp.up_proj.bias" in hf_dict:
-                fb_dict[f"{fb_prefix}.mlp.fc1.bias"] = hf_dict[f"{hf_prefix}.mlp.up_proj.bias"]
-            if f"{hf_prefix}.mlp.down_proj.weight" in hf_dict:
-                fb_dict[f"{fb_prefix}.mlp.fc2.weight"] = hf_dict[f"{hf_prefix}.mlp.down_proj.weight"]
-            if f"{hf_prefix}.mlp.down_proj.bias" in hf_dict:
-                fb_dict[f"{fb_prefix}.mlp.fc2.bias"] = hf_dict[f"{hf_prefix}.mlp.down_proj.bias"]
+            self._fuse_qkv(hf_dict, hub_dict, hf_prefix, hub_prefix)
 
-            # Attention Projections
-            if f"{hf_prefix}.attention.o_proj.weight" in hf_dict:
-                fb_dict[f"{fb_prefix}.attn.proj.weight"] = hf_dict[f"{hf_prefix}.attention.o_proj.weight"]
-            if f"{hf_prefix}.attention.o_proj.bias" in hf_dict:
-                fb_dict[f"{fb_prefix}.attn.proj.bias"] = hf_dict[f"{hf_prefix}.attention.o_proj.bias"]
+        return self._adapt_shapes(hub_dict)
 
-            # Attention QKV Concatenation (Complex Mapping)
-            if f"{hf_prefix}.attention.q_proj.weight" in hf_dict:
-                q_w = hf_dict[f"{hf_prefix}.attention.q_proj.weight"]
-                k_w = hf_dict[f"{hf_prefix}.attention.k_proj.weight"]
-                v_w = hf_dict[f"{hf_prefix}.attention.v_proj.weight"]
-                fb_dict[f"{fb_prefix}.attn.qkv.weight"] = torch.cat([q_w, k_w, v_w], dim=0)
+    def _fuse_qkv(self, hf_dict: dict, hub_dict: dict, hf_prefix: str, hub_prefix: str) -> None:
+        """Concatenate separate q/k/v projections into the fused qkv tensors.
 
-                q_b = hf_dict.get(f"{hf_prefix}.attention.q_proj.bias")
-                v_b = hf_dict.get(f"{hf_prefix}.attention.v_proj.bias")
-                if q_b is not None and v_b is not None:
-                    # K-projection typically has no bias in DINO architectures, pad with zeros
-                    k_b = torch.zeros_like(q_b)
-                    fb_dict[f"{fb_prefix}.attn.qkv.bias"] = torch.cat([q_b, k_b, v_b], dim=0)
+        Args:
+            hf_dict: Raw checkpoint state dict.
+            hub_dict: Output state dict, mutated in place.
+            hf_prefix: Source block prefix, e.g. ``layer.0``.
+            hub_prefix: Target block prefix, e.g. ``blocks.0``.
+        """
+        q_w = hf_dict.get(f"{hf_prefix}.attention.q_proj.weight")
+        k_w = hf_dict.get(f"{hf_prefix}.attention.k_proj.weight")
+        v_w = hf_dict.get(f"{hf_prefix}.attention.v_proj.weight")
+        if q_w is None or k_w is None or v_w is None:
+            return
 
-        return fb_dict
+        hub_dict[f"{hub_prefix}.attn.qkv.weight"] = torch.cat([q_w, k_w, v_w], dim=0)
+
+        q_b = hf_dict.get(f"{hf_prefix}.attention.q_proj.bias")
+        v_b = hf_dict.get(f"{hf_prefix}.attention.v_proj.bias")
+        if q_b is None or v_b is None:
+            return
+
+        # DINOv3 omits the key-projection bias; the fused tensor still needs the slot.
+        k_b = hf_dict.get(f"{hf_prefix}.attention.k_proj.bias", torch.zeros_like(q_b))
+        hub_dict[f"{hub_prefix}.attn.qkv.bias"] = torch.cat([q_b, k_b, v_b], dim=0)
+
+    def _adapt_shapes(self, hub_dict: dict) -> dict:
+        """Reshape mapped tensors that differ only in layout from the model's parameters.
+
+        Token tensors are stored as ``[1, 1, dim]`` in some checkpoints while the
+        architecture declares ``[1, dim]``. Reshaping is allowed only when the
+        element count matches exactly.
+
+        Args:
+            hub_dict: State dict keyed by hub parameter names.
+
+        Returns:
+            dict: The same state dict with every tensor matching the model's shapes.
+
+        Raises:
+            RuntimeError: If a tensor cannot be reshaped to the expected shape.
+        """
+        model_state = self.model.state_dict()
+        adapted: dict = {}
+
+        for key, tensor in hub_dict.items():
+            expected = model_state.get(key)
+            if expected is None:
+                adapted[key] = tensor
+                continue
+
+            if tensor.shape == expected.shape:
+                adapted[key] = tensor
+                continue
+
+            if tensor.numel() != expected.numel():
+                raise RuntimeError(
+                    f"[!] Cannot map '{key}': checkpoint shape {tuple(tensor.shape)} holds "
+                    f"{tensor.numel()} elements but the model expects "
+                    f"{tuple(expected.shape)} ({expected.numel()} elements)."
+                )
+
+            print(f"  [*] Reshaping '{key}' {tuple(tensor.shape)} -> {tuple(expected.shape)}")
+            adapted[key] = tensor.reshape(expected.shape)
+
+        return adapted
+
+    def _load_and_verify(self, mapped_state_dict: dict) -> None:
+        """Load the mapped weights and abort if any parameter stayed uninitialised.
+
+        Args:
+            mapped_state_dict: State dict keyed by hub parameter names.
+
+        Raises:
+            RuntimeError: If parameters remain unmatched after the load.
+        """
+        result = self.model.load_state_dict(mapped_state_dict, strict=False)
+
+        unexpected = list(result.unexpected_keys)
+        missing = [
+            key
+            for key in result.missing_keys
+            if not any(marker in key.lower() for marker in NON_PERSISTENT_KEY_MARKERS)
+        ]
+        skipped = [key for key in result.missing_keys if key not in missing]
+
+        print(f"[+] Mapped {len(mapped_state_dict)} tensors into the architecture.")
+        if skipped:
+            print(f"[*] {len(skipped)} derived buffer(s) intentionally not loaded: {skipped}")
+
+        if unexpected:
+            print(f"[!] {len(unexpected)} mapped key(s) do not exist in the model: {unexpected}")
+
+        if missing:
+            raise RuntimeError(
+                f"[!] {len(missing)} model parameter(s) were never assigned a weight and would "
+                f"stay randomly initialised: {missing}. Every embedding produced in this state "
+                "would be meaningless. Fix the key mapping before continuing."
+            )
+
+        self._verify_structural_buffers()
+        print("[+] All model parameters accounted for. Weights loaded correctly.")
+
+    @torch.no_grad()
+    def _verify_structural_buffers(self) -> None:
+        """Assert that skipped buffers really are constants the architecture built itself.
+
+        A buffer is only safe to skip if the module initialises it deterministically.
+        For the fused attention bias mask that means a binary tensor whose key third
+        is zero and whose query and value thirds are one. Checking this turns an
+        assumption into a verified fact; a silent mismatch here would corrupt every
+        attention layer exactly like an unmapped weight would.
+
+        Raises:
+            RuntimeError: If a bias mask does not match the expected constant pattern.
+        """
+        state = self.model.state_dict()
+        masks = {key: tensor for key, tensor in state.items() if key.endswith("attn.qkv.bias_mask")}
+
+        if not masks:
+            return
+
+        for key, mask in masks.items():
+            unique = set(mask.unique().tolist())
+            if not unique.issubset({0.0, 1.0}):
+                raise RuntimeError(
+                    f"[!] '{key}' is not a binary constant (values: {sorted(unique)}). It cannot "
+                    "be a structural buffer, so it must be mapped from the checkpoint instead."
+                )
+
+            if mask.numel() % QKV_PARTS != 0:
+                raise RuntimeError(
+                    f"[!] '{key}' has {mask.numel()} elements, which is not divisible into "
+                    f"{QKV_PARTS} query/key/value parts."
+                )
+
+            part = mask.numel() // QKV_PARTS
+            key_slice = mask[KEY_PART_INDEX * part : (KEY_PART_INDEX + 1) * part]
+            other = torch.cat([mask[:part], mask[(KEY_PART_INDEX + 1) * part :]])
+
+            if key_slice.any() or not other.all():
+                raise RuntimeError(
+                    f"[!] '{key}' does not zero exactly the key projection bias. Expected the "
+                    "middle third to be all zeros and the outer thirds all ones."
+                )
+
+        print(
+            f"[+] Verified {len(masks)} attention bias mask(s): key-projection bias correctly "
+            "zeroed by the architecture."
+        )
 
     @torch.no_grad()
     def process_images(self) -> None:
-        image_files = [f for f in os.listdir(self.input_dir) if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+        """Extract one embedding per input image, then build the vector database.
+
+        Each embedding is written as an individual .npy file so that a failed run
+        can be resumed, and the aggregate database is rebuilt at the end.
+        """
+        image_files = [f for f in os.listdir(self.input_dir) if f.lower().endswith(IMAGE_EXTENSIONS)]
 
         if not image_files:
             print(f"[-] No images found in {self.input_dir} to process.")
             return
 
+        grid = IMAGE_SIZE // PATCH_SIZE
         print(f"[*] Starting DINOv3 embedding extraction for {len(image_files)} images...")
+        print(f"[*] Input resized to {IMAGE_SIZE}x{IMAGE_SIZE} ({grid}x{grid} patches, no crop).")
+
+        succeeded = 0
+        failed = 0
 
         for img_name in image_files:
             img_path = self.input_dir / img_name
-            npy_filename = f"{os.path.splitext(img_name)[0]}.npy"
-            npy_path = self.output_dir / npy_filename
+            npy_path = self.output_dir / f"{os.path.splitext(img_name)[0]}.npy"
 
             try:
                 image = Image.open(img_path).convert("RGB")
@@ -171,29 +377,35 @@ class DinoEmbedder:
                 embedding = features.cpu().numpy().squeeze()
 
                 np.save(npy_path, embedding)
-                print(f"  [+] Extracted and saved true vector for: {img_name}")
+                print(f"  [+] {img_name} -> vector of dimension {embedding.shape}")
+                succeeded += 1
 
             except Exception as e:
-                print(f"[!] Failed to process {img_name}. Error: {e}")
+                print(f"  [-] Failed to process {img_name}. Error: {e}")
+                failed += 1
 
-        print("[+] Individual embeddings generated. Creating single VDB file...")
+        print(f"[+] Extraction complete: {succeeded} succeeded, {failed} failed.")
         self.create_vector_database()
 
     def create_vector_database(self) -> None:
-        all_embeddings = {}
+        """Aggregate every individual .npy embedding into a single compressed database.
 
-        npy_files = [
-            f for f in os.listdir(self.output_dir) if f.endswith(".npy") and f != "embeddings_db.npz"
-        ]
+        The archive is keyed by extensionless image name, which is the contract the
+        propagation step relies on when it pairs embeddings with label files.
+        """
+        npy_files = [f for f in os.listdir(self.output_dir) if f.endswith(".npy") and f != VDB_FILENAME]
 
-        for npy_file in npy_files:
-            img_key = npy_file.replace(".npy", "")
-            emb_array = np.load(self.output_dir / npy_file)
-            all_embeddings[img_key] = emb_array
+        if not npy_files:
+            print("[-] No embeddings found; vector database not created.")
+            return
 
-        db_path = self.output_dir / "embeddings_db.npz"
+        all_embeddings = {
+            npy_file.removesuffix(".npy"): np.load(self.output_dir / npy_file) for npy_file in npy_files
+        }
+
+        db_path = self.output_dir / VDB_FILENAME
         np.savez_compressed(db_path, **all_embeddings)
-        print(f"[+] Master Vector Database created successfully at: {db_path}")
+        print(f"[+] Master Vector Database created at {db_path} ({len(all_embeddings)} vectors).")
 
 
 if __name__ == "__main__":
