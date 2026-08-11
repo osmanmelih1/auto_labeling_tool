@@ -912,6 +912,10 @@ class AutoLabelingApp(QMainWindow):
 
 
 if __name__ == "__main__":
+    # Direct execution fallback. The supported entry point is `uv run main.py`,
+    # which also anchors the working directory to the project root.
+    os.chdir(PROJECT_ROOT)
+
     app = QApplication(sys.argv)
     window = AutoLabelingApp()
     window.show()
