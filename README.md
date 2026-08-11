@@ -41,7 +41,18 @@ data/raw/ ──[1]──> data/deduplicated/ ──[2]──> data/embeddings/e
 | 4 | `src/core/step4_propagation.py` | Patch-level propagation with localisation. |
 | 5 | `src/gui/app.py` (Review Queue) | Human-in-the-loop accept / reject for borderline matches. |
 | 6 | `src/core/step5_export.py` | Packages the labels into a YOLO dataset and writes `data.yaml`. |
-| 7 | _planned_ | YOLO training on the exported dataset. |
+| 7 | `src/core/step6_train.py` | Fine-tunes a YOLO detector on the exported dataset. |
+
+### Training measures the labels, not just the model
+
+Validation mAP is the only end-to-end check on label quality the pipeline has.
+Propagation can report high confidence scores and still have produced boxes a
+detector cannot learn from, and no amount of staring at heatmaps will prove
+otherwise. Training early, even on a small dataset, is how that gets caught.
+
+Step 7 refuses to run on an empty split, clamps the batch size to the dataset,
+and says plainly when the dataset is too small (under ~50 training images) for
+its metrics to mean anything. Weights land in `runs/<name>/weights/best.pt`.
 
 Three shared utilities sit outside the numbered steps:
 
@@ -199,6 +210,7 @@ uv run python -m src.core.step4_propagation
 5. **4. Propagation** — spread the seed labels across the unlabelled images.
 6. **5. Review Queue** — accept or reject the borderline results.
 7. **6. Export Dataset** — build `datasets/` and `data.yaml`, ready for training.
+8. **7. Train YOLO** — fine-tune a detector and report validation metrics.
 
 Define your classes with **Manage Classes** before drawing the first box; the
 canvas and the exporter both read them from `data/classes.json`.

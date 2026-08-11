@@ -20,7 +20,6 @@ Input:  ``data/deduplicated/``, ``data/labels/``, ``data/classes.json``
 Output: ``datasets/{train,val}/{images,labels}/`` and ``datasets/data.yaml``
 """
 
-import os
 import random
 import shutil
 from collections import defaultdict

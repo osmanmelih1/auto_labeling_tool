@@ -48,8 +48,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.core.class_config import class_color, class_name, load_classes, save_classes
-from src.core.review_queue import accept, clear_rejections, load_queue, reject, save_queue
+# The src.* imports below must follow the sys.path setup above, so E402 is
+# expected here. Running this file directly puts only src/gui on the path.
+from src.core.class_config import class_color, class_name, load_classes, save_classes  # noqa: E402
+from src.core.review_queue import (  # noqa: E402
+    accept,
+    clear_rejections,
+    load_queue,
+    reject,
+    save_queue,
+)
 
 try:
     from src.core.step4_propagation import AUTO_ACCEPT_THRESHOLD, REVIEW_THRESHOLD
@@ -1137,6 +1145,8 @@ class AutoLabelingApp(QMainWindow):
             QPushButton#classesBtn:hover { background-color: #5c636a; }
             QPushButton#exportBtn { background-color: #6f42c1; }
             QPushButton#exportBtn:hover { background-color: #5a32a3; }
+            QPushButton#trainBtn { background-color: #0f8b8d; }
+            QPushButton#trainBtn:hover { background-color: #0c7071; }
             QComboBox {
                 background-color: #3b3b3b; color: white; border: 1px solid #555;
                 padding: 5px; border-radius: 3px; font-size: 14px; margin: 5px 10px;
@@ -1199,6 +1209,12 @@ class AutoLabelingApp(QMainWindow):
         self.btn_export.clicked.connect(lambda: self.run_script("src.core.step5_export"))
         sidebar_layout.addWidget(self.btn_export)
         self.buttons.append(self.btn_export)
+
+        self.btn_train = QPushButton("7. Train YOLO")
+        self.btn_train.setObjectName("trainBtn")
+        self.btn_train.clicked.connect(lambda: self.run_script("src.core.step6_train"))
+        sidebar_layout.addWidget(self.btn_train)
+        self.buttons.append(self.btn_train)
 
         sidebar_layout.addStretch()
 

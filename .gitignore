@@ -23,6 +23,13 @@ dist/
 venv/
 env/
 
+# --- Working documents ---
+# Progress journals carry embedded screenshots and are regenerated per revision,
+# so they would add megabytes to the history for no benefit. The repository holds
+# source and the README; narrative documentation lives outside it.
+*.docx
+commit_msg.txt
+
 # --- Editors & IDEs ---
 .vscode/
 .idea/
