@@ -110,19 +110,31 @@ def draw_yolo_boxes_on_pixmap(pixmap: QPixmap, label_path: str | None) -> QPixma
 
 
 class WorkerThread(QThread):
-    """Runs heavy AI scripts in the background and sends output to the GUI console."""
+    """Runs a pipeline step in a background process and streams its output to the console."""
 
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(int)
 
-    def __init__(self, script_path):
+    def __init__(self, module_name: str):
+        """Store the step to execute.
+
+        Args:
+            module_name: Dotted module path, e.g. ``src.core.step4_propagation``.
+        """
         super().__init__()
-        self.script_path = script_path
+        self.module_name = module_name
 
     def run(self):
+        """Execute the step and emit each output line as it arrives."""
         try:
+            # Steps are launched with -m rather than by file path. Running a file
+            # puts only that file's directory on sys.path, so a step could not
+            # import shared helpers such as src.core.sam_engine. The explicit cwd
+            # also guarantees the relative data/... paths every step uses resolve
+            # against the project root.
             process = subprocess.Popen(
-                ["uv", "run", "python", self.script_path],
+                ["uv", "run", "python", "-m", self.module_name],
+                cwd=str(PROJECT_ROOT),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -776,11 +788,11 @@ class AutoLabelingApp(QMainWindow):
 
         self.buttons = []
         steps = [
-            ("1. Deduplication", "src/core/step1_deduplication.py"),
-            ("2. Embedding (VDB)", "src/core/step2_embedding.py"),
-            ("3a. Text Prompting", "src/core/step3a_text_prompting.py"),
-            ("3b. Manual Seeding", "src/core/step3b_manual_seeding.py"),
-            ("4. Propagation", "src/core/step4_propagation.py"),
+            ("1. Deduplication", "src.core.step1_deduplication"),
+            ("2. Embedding (VDB)", "src.core.step2_embedding"),
+            ("3a. Text Prompting", "src.core.step3a_text_prompting"),
+            ("3b. Manual Seeding", "src.core.step3b_manual_seeding"),
+            ("4. Propagation", "src.core.step4_propagation"),
         ]
 
         for text, path in steps:
@@ -876,8 +888,13 @@ class AutoLabelingApp(QMainWindow):
         self.log_textbox.setTextCursor(cursor)
         self.log_textbox.ensureCursorVisible()
 
-    def run_script(self, script_path):
-        if "step3a" in script_path:
+    def run_script(self, module_name: str):
+        """Launch a pipeline step, writing any prompt file it depends on first.
+
+        Args:
+            module_name: Dotted module path of the step to execute.
+        """
+        if "step3a" in module_name:
             prompt_text = self.prompt_input.text().strip()
             if not prompt_text:
                 self.append_log(
@@ -900,10 +917,10 @@ class AutoLabelingApp(QMainWindow):
             self.append_log(f"[*] Prompt saved for Step 3a: '{prompt_text}'\n")
 
         self.append_log(f"\n[{'=' * 40}]\n")
-        self.append_log(f"[*] Executing: {script_path}\n")
+        self.append_log(f"[*] Executing: {module_name}\n")
 
         self.set_buttons_state(False)
-        self.worker = WorkerThread(script_path)
+        self.worker = WorkerThread(module_name)
         self.worker.log_signal.connect(self.append_log)
         self.worker.finished_signal.connect(self.on_script_finished)
         self.worker.start()

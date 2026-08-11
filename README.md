@@ -14,40 +14,71 @@ from and writes its output to the `data/` hierarchy. No module imports another m
 internals — they communicate exclusively through files (JSON, TXT, images, NPZ).
 
 ```
-data/raw/  ──[1]──> data/deduplicated/  ──[2]──> data/embeddings/embeddings_db.npz
-                              │                              │
-                              │  [3a] text prompt            │
-                              │  [3b] manual bounding box    │
-                              ▼                              ▼
-                        data/labels/*.txt  <──[4] propagation (cosine similarity)
-                        data/masks/*.png              │
-                                                      ▼
-                                          data/review_queue.json ──[5] human review
-                                                      │
-                                                      ▼
-                                                 datasets/ ──[6] YOLO training
+data/raw/ ──[1]──> data/deduplicated/ ──[2]──> data/embeddings/embeddings_db.npz  (global CLS)
+                            │                  data/embeddings/patches/*.npy      (28x28 grid)
+                            │                                  │
+                            │  [3a] text prompt                │
+                            │  [3b] manual bounding box        │
+                            ▼                                  ▼
+                      data/labels/*.txt  ─── seeds ───> [4] patch prototype
+                                                             → similarity heatmap
+                                                             → SAM → localize
+                                                                  │
+                              data/labels/, data/masks/, data/debug/ <┘
+                                                                  │
+                                              data/review_queue.json ──[5] human review
+                                                                  │
+                                                                  ▼
+                                                             datasets/ ──[6] YOLO training
 ```
 
 | Step | Module | Purpose |
 | --- | --- | --- |
 | 1 | `src/core/step1_deduplication.py` | Removes near-duplicate images (`imagededup` CNN, threshold 0.95). |
-| 2 | `src/core/step2_embedding.py` | Extracts DINOv3 ViT-B/16 features and builds the master vector database. |
+| 2 | `src/core/step2_embedding.py` | Extracts DINOv3 ViT-B/16 features: one global CLS vector per image plus a cached 28×28 patch token grid. |
 | 3a | `src/core/step3a_text_prompting.py` | Zero-shot seeding: Grounding DINO (text→box) → SAM (box→mask) → YOLO label. |
 | 3b | `src/core/step3b_manual_seeding.py` | Manual seeding: GUI bounding box → SAM (box→mask) → YOLO label. |
-| 4 | `src/core/step4_propagation.py` | Multi-seed propagation with confidence tiers. |
+| 4 | `src/core/step4_propagation.py` | Patch-level propagation with localisation. |
 | 5 | `src/gui/app.py` (Review Queue) | Human-in-the-loop accept / reject for borderline matches. |
 | 6 | _planned_ | Dataset export (`step5_export.py`) and classifier / YOLO training. |
 
+`src/core/sam_engine.py` is a shared utility rather than a step: it loads SAM once
+and converts prompts to masks and masks to YOLO boxes for whichever step needs it.
+
+### How Step 4 locates an object
+
+The seed's coordinates are never copied to the target. For each target image:
+
+1. Every seed box is reduced to a **prototype vector** by mean-pooling the DINOv3
+   patch tokens inside it.
+2. The target's patch grid is compared against every prototype, giving a cosine
+   **similarity heatmap**. The best score over all prototypes is the detection
+   confidence, and the winning seed is recorded as provenance.
+3. The connected region around the heatmap peak gives a **coarse box** in the
+   target's own pixel space.
+4. **SAM** turns that coarse box plus the peak point into a precise mask, whose
+   bounding box becomes the YOLO label.
+
+Every decision also writes a heatmap overlay to `data/debug/`, named
+`tier_score_image.jpg`, so results can be checked by eye rather than trusted.
+
 ### Confidence tiers (Step 4)
 
-| Cosine score | Decision |
+| Patch similarity | Decision |
 | --- | --- |
-| `>= 0.92` | **AUTO-ACCEPT** — label written directly to `data/labels/`. |
-| `0.82 – 0.92` | **REVIEW QUEUE** — written as a draft, queued in `data/review_queue.json`. |
-| `< 0.82` | **REJECT** — ignored. |
+| `>= 0.86` | **AUTO-ACCEPT** — label written directly to `data/labels/`. |
+| `0.78 – 0.86` | **REVIEW QUEUE** — written as a draft, queued in `data/review_queue.json`. |
+| `< 0.78` | **REJECT** — ignored. |
 
-Thresholds live in `src/core/step4_propagation.py` (`AUTO_ACCEPT_THRESHOLD`,
-`REVIEW_THRESHOLD`) and are imported by the GUI so both stay in sync.
+These are calibrated on a small validation run and sit deliberately on the
+cautious side, so most true matches reach the review queue rather than being
+accepted outright. Tighten them once the score distribution over the full dataset
+is known. Thresholds live in `src/core/step4_propagation.py`
+(`AUTO_ACCEPT_THRESHOLD`, `REVIEW_THRESHOLD`) and are imported by the GUI so both
+stay in sync.
+
+Seed quality matters more than seed quantity: every label file in `data/labels/`
+becomes a prototype, so one wrong box poisons the pool for the whole run.
 
 ---
 
@@ -69,6 +100,9 @@ it after cloning:
 ```bash
 mkdir -p data/raw data/deduplicated data/embeddings data/labels data/masks data/models
 ```
+
+`data/embeddings/patches/`, `data/debug/` and `data/review_queue.json` are created
+by the steps that write them.
 
 Drop your source images into `data/raw/`.
 
@@ -103,6 +137,14 @@ uv run main.py
 
 `main.py` anchors the working directory to the project root, because every step module
 addresses the data hierarchy with relative `data/...` paths by design.
+
+Individual steps run as modules, not as file paths, so that they can import shared
+helpers such as `src.core.sam_engine`:
+
+```bash
+uv run python -m src.core.step2_embedding
+uv run python -m src.core.step4_propagation
+```
 
 ### Typical workflow
 

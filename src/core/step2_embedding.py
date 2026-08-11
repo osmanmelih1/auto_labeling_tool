@@ -32,11 +32,26 @@ HUB_ENTRYPOINT = "dinov3_vitb16"
 # Input images are resized to this square size. It must be a multiple of the
 # patch size (16). No centre crop is applied: cropping discards the edges of the
 # frame, and objects that live near the border would never reach the encoder.
-IMAGE_SIZE = 224
+#
+# The size also sets the localisation granularity of Step 4. At 448 the grid is
+# 28x28, so one patch covers ~3.6% of the frame; at 224 it is 14x14 and a patch
+# covers ~7%, which is too coarse to point SAM at a specific object.
+IMAGE_SIZE = 448
 PATCH_SIZE = 16
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
 VDB_FILENAME = "embeddings_db.npz"
+
+# Subdirectory holding the per-image patch token grids used by Step 4.
+PATCH_SUBDIR = "patches"
+
+# Keys returned by DinoVisionTransformer.forward_features.
+CLS_TOKEN_KEY = "x_norm_clstoken"
+PATCH_TOKENS_KEY = "x_norm_patchtokens"
+
+# Patch grids are large (grid^2 x 768 per image). Half precision halves the cost
+# on disk and is far below the noise floor of a cosine similarity comparison.
+PATCH_DTYPE = np.float16
 
 # Register (storage) tokens are named differently across DINO generations.
 REGISTER_TOKEN_CANDIDATES = ("storage_tokens", "register_tokens")
@@ -346,11 +361,45 @@ class DinoEmbedder:
         )
 
     @torch.no_grad()
-    def process_images(self) -> None:
-        """Extract one embedding per input image, then build the vector database.
+    def extract_features(self, image: Image.Image) -> tuple[np.ndarray, np.ndarray]:
+        """Run one image through the encoder and return its global and patch features.
 
-        Each embedding is written as an individual .npy file so that a failed run
-        can be resumed, and the aggregate database is rebuilt at the end.
+        Args:
+            image: RGB source image at its original resolution.
+
+        Returns:
+            tuple: The CLS vector of shape ``(embed_dim,)`` and the patch grid of
+            shape ``(grid, grid, embed_dim)`` laid out row-major over the resized
+            image, so grid cell (row, col) maps back to a known pixel region.
+
+        Raises:
+            RuntimeError: If the encoder returns an unexpected number of patch tokens.
+        """
+        input_tensor = self.transform(image).unsqueeze(0).to(self.device)
+        features = self.model.forward_features(input_tensor)
+
+        cls_vector = features[CLS_TOKEN_KEY].squeeze(0).cpu().numpy()
+        patch_tokens = features[PATCH_TOKENS_KEY].squeeze(0).cpu().numpy()
+
+        grid = IMAGE_SIZE // PATCH_SIZE
+        expected = grid * grid
+        if patch_tokens.shape[0] != expected:
+            raise RuntimeError(
+                f"[!] Encoder returned {patch_tokens.shape[0]} patch tokens but a "
+                f"{IMAGE_SIZE}x{IMAGE_SIZE} input should produce {expected} ({grid}x{grid}). "
+                "The patch grid could not be reshaped, so no spatial mapping is possible."
+            )
+
+        patch_grid = patch_tokens.reshape(grid, grid, -1)
+        return cls_vector, patch_grid
+
+    def process_images(self) -> None:
+        """Extract global and patch embeddings for every image, then build the database.
+
+        Two artefacts are written per image: the global CLS vector, which the
+        vector database aggregates, and the patch token grid, which Step 4 needs
+        to locate an object inside a target frame. Both are written per image so
+        an interrupted run can be resumed.
         """
         image_files = [f for f in os.listdir(self.input_dir) if f.lower().endswith(IMAGE_EXTENSIONS)]
 
@@ -358,26 +407,29 @@ class DinoEmbedder:
             print(f"[-] No images found in {self.input_dir} to process.")
             return
 
+        patch_dir = self.output_dir / PATCH_SUBDIR
+        patch_dir.mkdir(parents=True, exist_ok=True)
+
         grid = IMAGE_SIZE // PATCH_SIZE
         print(f"[*] Starting DINOv3 embedding extraction for {len(image_files)} images...")
         print(f"[*] Input resized to {IMAGE_SIZE}x{IMAGE_SIZE} ({grid}x{grid} patches, no crop).")
+        print(f"[*] Patch grids cached as {PATCH_DTYPE.__name__} under {patch_dir}")
 
         succeeded = 0
         failed = 0
 
         for img_name in image_files:
             img_path = self.input_dir / img_name
-            npy_path = self.output_dir / f"{os.path.splitext(img_name)[0]}.npy"
+            image_key = os.path.splitext(img_name)[0]
 
             try:
                 image = Image.open(img_path).convert("RGB")
-                input_tensor = self.transform(image).unsqueeze(0).to(self.device)
+                cls_vector, patch_grid = self.extract_features(image)
 
-                features = self.model(input_tensor)
-                embedding = features.cpu().numpy().squeeze()
+                np.save(self.output_dir / f"{image_key}.npy", cls_vector)
+                np.save(patch_dir / f"{image_key}.npy", patch_grid.astype(PATCH_DTYPE))
 
-                np.save(npy_path, embedding)
-                print(f"  [+] {img_name} -> vector of dimension {embedding.shape}")
+                print(f"  [+] {img_name} -> cls {cls_vector.shape}, patches {patch_grid.shape}")
                 succeeded += 1
 
             except Exception as e:
