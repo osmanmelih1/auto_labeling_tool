@@ -33,7 +33,6 @@ dependencies = [
     { name = "opencv-python" },
     { name = "pillow" },
     { name = "pyqt6" },
-    { name = "ruff" },
     { name = "safetensors" },
     { name = "segment-anything" },
     { name = "termcolor" },
@@ -43,6 +42,11 @@ dependencies = [
     { name = "transformers" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "ruff" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "imagededup", specifier = ">=0.3.3.post2" },
@@ -50,7 +54,6 @@ requires-dist = [
     { name = "opencv-python", specifier = ">=5.0.0.93" },
     { name = "pillow", specifier = ">=12.3.0" },
     { name = "pyqt6", specifier = ">=6.11.0" },
-    { name = "ruff", specifier = ">=0.16.1" },
     { name = "safetensors", specifier = ">=0.8.0" },
     { name = "segment-anything", specifier = ">=1.0" },
     { name = "termcolor", specifier = ">=3.3.0" },
@@ -59,6 +62,9 @@ requires-dist = [
     { name = "torchvision", specifier = ">=0.28.0" },
     { name = "transformers", specifier = ">=5.14.1" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "ruff", specifier = ">=0.16.1" }]
 
 [[package]]
 name = "certifi"

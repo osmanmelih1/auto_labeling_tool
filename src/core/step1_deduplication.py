@@ -1,9 +1,11 @@
-"""
-Module: step1_deduplication
-Description: A module to identify and remove exact or near-duplicate images 
-             from a dataset using CNN-based feature extraction. This ensures 
-             a clean dataset before generating embeddings with DinoV3.
-Author: [Senin Adın/Ekibin]
+"""Step 1 - Deduplication.
+
+Identifies and removes exact or near-duplicate images from the raw dataset using
+CNN-based feature extraction. This guarantees a clean, non-redundant dataset
+before embeddings are generated with DINOv3 in Step 2.
+
+Input:  ``data/raw/``
+Output: ``data/deduplicated/``
 """
 
 import os

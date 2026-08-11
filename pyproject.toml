@@ -1,7 +1,7 @@
 [project]
 name = "auto-labeling-tool"
 version = "0.1.0"
-description = "Add your description here"
+description = "Autonomous data labeling and active learning platform for training YOLO object detection models."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -10,7 +10,6 @@ dependencies = [
     "opencv-python>=5.0.0.93",
     "pillow>=12.3.0",
     "pyqt6>=6.11.0",
-    "ruff>=0.16.1",
     "safetensors>=0.8.0",
     "segment-anything>=1.0",
     "termcolor>=3.3.0",
@@ -19,3 +18,37 @@ dependencies = [
     "torchvision>=0.28.0",
     "transformers>=5.14.1",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.1",
+]
+
+# --- Ruff: linter + formatter configuration ---
+[tool.ruff]
+line-length = 110
+target-version = "py313"
+exclude = [".venv", "data", "datasets", "runs"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort - deterministic import ordering
+    "UP",   # pyupgrade - modern Python syntax
+    "B",    # flake8-bugbear - likely bugs
+    "SIM",  # flake8-simplify
+    "D",    # pydocstyle - every module/class/function must be documented
+]
+ignore = [
+    "D203",  # conflicts with D211 (no blank line before class docstring)
+    "D213",  # conflicts with D212 (multi-line summary on first line)
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
