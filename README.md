@@ -106,10 +106,23 @@ The seed's coordinates are never copied to the target. For each target image:
 2. The target's patch grid is compared against every prototype, giving a cosine
    **similarity heatmap**. The best score over all prototypes is the detection
    confidence, and the winning seed is recorded as provenance.
-3. The connected region around the heatmap peak gives a **coarse box** in the
-   target's own pixel space.
-4. **SAM** turns that coarse box plus the peak point into a precise mask, whose
-   bounding box becomes the YOLO label.
+3. **Every** connected region above an absolute similarity level gives a **coarse
+   box** in the target's own pixel space, not just the strongest one.
+4. **SAM** turns each coarse box plus its peak point into a precise mask, whose
+   bounding box becomes a YOLO label line.
+
+A frame holding three pallets must be labelled with three boxes. Labelling only
+the strongest tells the detector that the other two are background, which is
+worse than leaving the frame out of the dataset entirely. The detection level is
+absolute rather than relative to the frame's own peak, because a relative level
+defines "hot" in terms of the single best match and hides every dimmer instance.
+
+Region size is not used as evidence: a distant object can occupy a single patch
+cell, so the similarity score alone decides. Detections overlapping by more than
+55% are merged, which is usually one object split in two by an occluder.
+
+An image is auto-accepted only when **every** box in it clears the threshold. One
+uncertain instance is reason enough for a human to see the frame.
 
 Every decision also writes a heatmap overlay to `data/debug/`, named
 `tier_score_image.jpg`, so results can be checked by eye rather than trusted.

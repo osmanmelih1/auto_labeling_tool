@@ -28,8 +28,10 @@ Confidence tiers gate the result:
   - REVIEW QUEUE (REVIEW_THRESHOLD <= score < AUTO_ACCEPT_THRESHOLD)
   - REJECTED     (score < REVIEW_THRESHOLD)
 
-Known limitation: one object per image. The peak region yields a single box, so
-frames containing several instances of a class receive only the strongest one.
+Every distinct hot region becomes its own box, not just the strongest one. A frame
+holding three pallets must be labelled with three boxes: labelling only one tells
+the detector that the other two are background, which is worse than leaving the
+frame out of the dataset entirely.
 
 Input:  ``data/embeddings/patches/``, ``data/labels/`` (seeds), ``data/deduplicated/``
 Output: ``data/labels/``, ``data/masks/``, ``data/review_queue.json``, ``data/debug/``
@@ -57,14 +59,39 @@ from src.core.sam_engine import SamEngine, box_area, mask_to_yolo_box, yolo_box_
 AUTO_ACCEPT_THRESHOLD = 0.86
 REVIEW_THRESHOLD = 0.78
 
-# The object region is every heatmap cell within this fraction of the peak's
-# height above the heatmap floor. Lower values grow the coarse box.
-REGION_RELATIVE_LEVEL = 0.75
+# A heatmap cell belongs to an object region when its similarity reaches this
+# absolute level. It is tied to the review threshold on purpose: a region is worth
+# proposing exactly when its best patch would pass human review. Using a level
+# relative to the frame's own peak instead would define "hot" in terms of the
+# single strongest match and hide every dimmer instance of the same object.
+DETECTION_LEVEL = 0.78
+
+# A region qualifies on its similarity score, not on its size. A distant object
+# can occupy a single patch cell, and discarding one-cell regions silently drops
+# exactly the small instances multi-object support exists to catch. The absolute
+# DETECTION_LEVEL above is what separates objects from noise; region size is not
+# evidence either way.
+MIN_REGION_CELLS = 1
+
+# Upper bound on boxes emitted for one image, as a guard against a heatmap that
+# fragments into dozens of specks.
+MAX_OBJECTS_PER_IMAGE = 20
+
+# Two detections overlapping by more than this are the same object, usually one
+# object split into two heatmap regions by an occluder.
+DUPLICATE_IOU = 0.55
 
 # SAM occasionally latches onto the background instead of the prompted object.
 # If its mask is this many times larger than the coarse box, the coarse box is
 # kept instead and the case is flagged in the log.
 MAX_SAM_AREA_GROWTH = 4.0
+
+# The growth ratio alone is too strict for small prompts. A distant object can
+# occupy a single patch cell, which is 0.13% of the frame, and any correct mask
+# for it necessarily exceeds four times that. Growth is therefore allowed up to
+# this fraction of the frame regardless of the ratio, so the guard still catches
+# a leak into the background without discarding every small object.
+SMALL_PROMPT_AREA_ALLOWANCE = 0.05
 
 PATCH_DIR = "data/embeddings/patches"
 IMAGE_DIR = "data/deduplicated"
@@ -130,6 +157,61 @@ def unit(vectors: np.ndarray) -> np.ndarray:
     """
     norms = np.linalg.norm(vectors, axis=-1, keepdims=True)
     return vectors / (norms + 1e-8)
+
+
+def iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    """Compute intersection over union for two normalised YOLO boxes.
+
+    Args:
+        a: First box as ``(x_center, y_center, width, height)``.
+        b: Second box in the same format.
+
+    Returns:
+        float: Overlap ratio between 0 and 1.
+    """
+    ax0, ay0, ax1, ay1 = a[0] - a[2] / 2, a[1] - a[3] / 2, a[0] + a[2] / 2, a[1] + a[3] / 2
+    bx0, by0, bx1, by1 = b[0] - b[2] / 2, b[1] - b[3] / 2, b[0] + b[2] / 2, b[1] + b[3] / 2
+
+    inter_w = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+    inter_h = max(0.0, min(ay1, by1) - max(ay0, by0))
+    intersection = inter_w * inter_h
+
+    union = a[2] * a[3] + b[2] * b[3] - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+@dataclass
+class RegionCandidate:
+    """One connected hot region of a heatmap, before SAM refinement.
+
+    Attributes:
+        score: Highest cosine similarity inside the region.
+        box: Coarse normalised box covering the region.
+        peak: ``(row, col)`` of the strongest cell, used as a SAM point prompt.
+        cell_count: How many patch cells the region spans.
+    """
+
+    score: float
+    box: tuple[float, float, float, float]
+    peak: tuple[int, int]
+    cell_count: int
+
+
+@dataclass
+class Detection:
+    """One object located in a target image.
+
+    Attributes:
+        box: Final normalised YOLO box.
+        mask: SAM mask when one was kept, otherwise None.
+        score: Patch similarity that produced this detection.
+        note: Short description of how the box was decided.
+    """
+
+    box: tuple[float, float, float, float]
+    mask: np.ndarray | None
+    score: float
+    note: str
 
 
 @dataclass
@@ -278,59 +360,75 @@ class PatchPropagator:
 
         return best_score, best_proto, best_heatmap
 
-    def peak_region_box(
-        self, heatmap: np.ndarray
-    ) -> tuple[tuple[float, float, float, float], tuple[int, int]]:
-        """Derive a coarse normalised box from the heatmap's peak region.
+    def find_object_regions(self, heatmap: np.ndarray) -> list[RegionCandidate]:
+        """Find every distinct object candidate in a heatmap, not just the strongest.
 
-        Only the connected region containing the peak is kept, so a second,
-        unrelated hot spot elsewhere in the frame cannot stretch the box across
-        the whole image.
+        The heatmap is thresholded at an absolute cosine level rather than one
+        relative to its own peak. A relative level defines "hot" in terms of the
+        single best match in the frame, which hides a second, slightly dimmer
+        instance of the same object; an absolute level asks the same question of
+        every region independently: would this region's best patch pass review?
+
+        Each connected region above that level becomes one candidate, scored by
+        its own strongest patch.
 
         Args:
             heatmap: Cosine similarity per patch cell, shape ``(rows, cols)``.
 
         Returns:
-            tuple: The normalised ``(x_center, y_center, width, height)`` box and
-            the ``(row, col)`` index of the peak cell.
+            list: Candidates ordered by score, strongest first.
         """
         rows, cols = heatmap.shape
-        peak_r, peak_c = np.unravel_index(int(heatmap.argmax()), heatmap.shape)
+        binary = (heatmap >= DETECTION_LEVEL).astype(np.uint8)
 
-        floor, ceiling = float(heatmap.min()), float(heatmap.max())
-        level = floor + (ceiling - floor) * REGION_RELATIVE_LEVEL
-        binary = (heatmap >= level).astype(np.uint8)
+        if not binary.any():
+            return []
 
         count, labelled = cv2.connectedComponents(binary, connectivity=8)
-        if count > 1:
-            binary = (labelled == labelled[peak_r, peak_c]).astype(np.uint8)
+        candidates: list[RegionCandidate] = []
 
-        occupied_rows = np.where(binary.any(axis=1))[0]
-        occupied_cols = np.where(binary.any(axis=0))[0]
-        r0, r1 = int(occupied_rows[0]), int(occupied_rows[-1]) + 1
-        c0, c1 = int(occupied_cols[0]), int(occupied_cols[-1]) + 1
+        for label in range(1, count):
+            member = labelled == label
+            if int(member.sum()) < MIN_REGION_CELLS:
+                continue
 
-        box = (
-            (c0 + c1) / 2.0 / cols,
-            (r0 + r1) / 2.0 / rows,
-            (c1 - c0) / cols,
-            (r1 - r0) / rows,
-        )
-        return box, (int(peak_r), int(peak_c))
+            masked = np.where(member, heatmap, -np.inf)
+            peak_r, peak_c = np.unravel_index(int(masked.argmax()), masked.shape)
 
-    def localize(
-        self, image_key: str, heatmap: np.ndarray
-    ) -> tuple[tuple[float, float, float, float], np.ndarray | None, str] | None:
-        """Convert a heatmap into a precise YOLO box using SAM.
+            occupied_rows = np.where(member.any(axis=1))[0]
+            occupied_cols = np.where(member.any(axis=0))[0]
+            r0, r1 = int(occupied_rows[0]), int(occupied_rows[-1]) + 1
+            c0, c1 = int(occupied_cols[0]), int(occupied_cols[-1]) + 1
+
+            candidates.append(
+                RegionCandidate(
+                    score=float(heatmap[peak_r, peak_c]),
+                    box=(
+                        (c0 + c1) / 2.0 / cols,
+                        (r0 + r1) / 2.0 / rows,
+                        (c1 - c0) / cols,
+                        (r1 - r0) / rows,
+                    ),
+                    peak=(int(peak_r), int(peak_c)),
+                    cell_count=int(member.sum()),
+                )
+            )
+
+        candidates.sort(key=lambda c: -c.score)
+        return candidates[:MAX_OBJECTS_PER_IMAGE]
+
+    def localize_regions(
+        self, image_key: str, heatmap: np.ndarray, candidates: list[RegionCandidate]
+    ) -> list[Detection] | None:
+        """Refine every candidate region into a precise box with SAM.
 
         Args:
             image_key: Target image key.
             heatmap: Similarity heatmap for the winning prototype.
+            candidates: Regions found in that heatmap.
 
         Returns:
-            tuple | None: The final normalised box, the mask when SAM produced a
-            usable one, and a note describing which result was kept. None when
-            the source image cannot be read.
+            list | None: Accepted detections, or None when the image cannot be read.
         """
         image_path = resolve_image_path(self.image_dir, image_key)
         if image_path is None:
@@ -344,37 +442,60 @@ class PatchPropagator:
 
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         img_h, img_w = image_rgb.shape[:2]
-
-        coarse_box, (peak_r, peak_c) = self.peak_region_box(heatmap)
         rows, cols = heatmap.shape
-        peak_xy = ((peak_c + 0.5) / cols * img_w, (peak_r + 0.5) / rows * img_h)
 
+        # The image encoding is the expensive part of SAM and is independent of the
+        # prompt, so it is computed once and reused for every candidate.
         self.sam.set_image(image_rgb)
-        mask, sam_score = self.sam.mask_from_prompt(
-            box_xyxy=yolo_box_to_pixels(coarse_box, img_w, img_h),
-            point_xy=peak_xy,
-        )
 
-        refined = mask_to_yolo_box(mask)
-        if refined is None:
-            return coarse_box, None, "SAM returned an empty mask; kept the heatmap box"
+        detections: list[Detection] = []
 
-        growth = box_area(refined) / max(box_area(coarse_box), 1e-8)
-        if growth > MAX_SAM_AREA_GROWTH:
-            return (
-                coarse_box,
-                None,
-                f"SAM mask {growth:.1f}x larger than the prompt, likely background leak; "
-                "kept the heatmap box",
+        for candidate in candidates:
+            peak_r, peak_c = candidate.peak
+            peak_xy = ((peak_c + 0.5) / cols * img_w, (peak_r + 0.5) / rows * img_h)
+
+            mask, sam_score = self.sam.mask_from_prompt(
+                box_xyxy=yolo_box_to_pixels(candidate.box, img_w, img_h),
+                point_xy=peak_xy,
             )
 
-        return refined, mask, f"SAM mask kept (confidence {sam_score:.3f})"
+            refined = mask_to_yolo_box(mask)
+            if refined is None:
+                box, kept_mask, note = candidate.box, None, "empty SAM mask; kept heatmap box"
+            else:
+                prompt_area = box_area(candidate.box)
+                allowed = max(prompt_area * MAX_SAM_AREA_GROWTH, SMALL_PROMPT_AREA_ALLOWANCE)
+                if box_area(refined) > allowed:
+                    box, kept_mask = candidate.box, None
+                    note = (
+                        f"SAM mask covers {box_area(refined):.1%} of the frame against an "
+                        f"allowance of {allowed:.1%}, likely background leak; kept heatmap box"
+                    )
+                else:
+                    box, kept_mask = refined, mask
+                    note = f"SAM {sam_score:.3f}"
+
+            duplicate_of = next(
+                (i for i, existing in enumerate(detections) if iou(box, existing.box) > DUPLICATE_IOU),
+                None,
+            )
+            if duplicate_of is not None:
+                # One object split across two heatmap regions, usually by an
+                # occluder. Keep the stronger detection rather than emitting the
+                # same object twice.
+                if candidate.score > detections[duplicate_of].score:
+                    detections[duplicate_of] = Detection(box, kept_mask, candidate.score, note)
+                continue
+
+            detections.append(Detection(box, kept_mask, candidate.score, note))
+
+        return detections
 
     def save_debug_overlay(
         self,
         image_key: str,
         heatmap: np.ndarray,
-        final_box: tuple[float, float, float, float],
+        detections: list[Detection],
         decision: str,
         score: float,
     ) -> None:
@@ -383,9 +504,9 @@ class PatchPropagator:
         Args:
             image_key: Target image key.
             heatmap: Similarity heatmap for the winning prototype.
-            final_box: The box that was written, normalised.
+            detections: Every box written for this image.
             decision: Tier name, used in the filename.
-            score: Detection confidence, used in the filename.
+            score: Best detection confidence, used in the filename.
         """
         image_path = resolve_image_path(self.image_dir, image_key)
         if image_path is None:
@@ -405,9 +526,17 @@ class PatchPropagator:
 
             blended = Image.blend(base, overlay, 0.4)
             draw = ImageDraw.Draw(blended)
-            draw.rectangle(list(yolo_box_to_pixels(final_box, width, height)), outline=(0, 255, 0), width=4)
 
-            blended.save(self.debug_dir / f"{decision.lower()}_{score:.3f}_{image_key}.jpg", quality=80)
+            for detection in detections:
+                x0, y0, x1, y1 = yolo_box_to_pixels(detection.box, width, height)
+                # Green once the box would be accepted outright, amber while it
+                # still needs a human, so a mixed image is obvious at a glance.
+                colour = (0, 255, 0) if detection.score >= AUTO_ACCEPT_THRESHOLD else (255, 176, 0)
+                draw.rectangle([x0, y0, x1, y1], outline=colour, width=4)
+                draw.text((x0 + 6, max(0, y0 - 16)), f"{detection.score:.3f}", fill=colour)
+
+            name = f"{decision.lower()}_{score:.3f}_n{len(detections)}_{image_key}.jpg"
+            blended.save(self.debug_dir / name, quality=80)
         except Exception as e:
             print(f"  [-] {image_key}: could not write debug overlay ({e}).")
 
@@ -432,7 +561,7 @@ class PatchPropagator:
         print(f"[*] Tiers -> AUTO >= {AUTO_ACCEPT_THRESHOLD} | REVIEW >= {REVIEW_THRESHOLD}\n")
 
         queue = load_queue(str(self.review_queue_path))
-        auto = review = rejected = suppressed = 0
+        auto = review = rejected = suppressed = objects = 0
 
         for image_key in targets:
             grid = self.load_patch_grid(image_key)
@@ -452,23 +581,33 @@ class PatchPropagator:
                 suppressed += 1
                 continue
 
-            result = self.localize(image_key, heatmap)
-            if result is None:
+            candidates = self.find_object_regions(heatmap)
+            detections = self.localize_regions(image_key, heatmap, candidates)
+            if not detections:
                 rejected += 1
                 continue
 
-            final_box, mask, note = result
-            decision = "AUTO" if score >= AUTO_ACCEPT_THRESHOLD else "REVIEW"
+            # An image is only accepted outright when every box in it would be.
+            # One uncertain instance is enough reason for a human to look at the
+            # frame, because a missed object teaches the detector that the object
+            # is background.
+            weakest = min(d.score for d in detections)
+            decision = "AUTO" if weakest >= AUTO_ACCEPT_THRESHOLD else "REVIEW"
 
             label_path = self.label_dir / f"{image_key}.txt"
-            xc, yc, w, h = final_box
             with open(label_path, "w") as f:
-                f.write(f"{proto.class_id} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f}\n")
+                for detection in detections:
+                    xc, yc, w, h = detection.box
+                    f.write(f"{proto.class_id} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f}\n")
 
-            if mask is not None:
-                cv2.imwrite(str(self.mask_dir / f"{image_key}.png"), mask.astype(np.uint8) * 255)
+            masks = [d.mask for d in detections if d.mask is not None]
+            if masks:
+                combined = np.zeros_like(masks[0], dtype=np.uint8)
+                for mask in masks:
+                    combined |= mask.astype(np.uint8)
+                cv2.imwrite(str(self.mask_dir / f"{image_key}.png"), combined * 255)
 
-            self.save_debug_overlay(image_key, heatmap, final_box, decision, score)
+            self.save_debug_overlay(image_key, heatmap, detections, decision, score)
 
             if decision == "AUTO":
                 queue.setdefault("pending", {}).pop(image_key, None)
@@ -479,6 +618,8 @@ class PatchPropagator:
                     image_key,
                     {
                         "score": round(score, 4),
+                        "weakest_score": round(weakest, 4),
+                        "object_count": len(detections),
                         "seed_source": proto.image_key,
                         "class_id": proto.class_id,
                         "label_path": os.path.abspath(label_path),
@@ -491,13 +632,16 @@ class PatchPropagator:
                 )
                 review += 1
 
+            objects += len(detections)
+            summary = ", ".join(f"{d.score:.3f} [{d.note}]" for d in detections)
             print(
-                f"  [{decision:6}] {image_key} | {score:.4f} | seed '{proto.image_key}' | "
-                f"box ({xc:.3f}, {yc:.3f}, {w:.3f}, {h:.3f}) | {note}"
+                f"  [{decision:6}] {image_key} | best {score:.4f} | seed "
+                f"'{proto.image_key}' | {len(detections)} object(s): {summary}"
             )
 
         save_queue(queue, str(self.review_queue_path))
 
+        labelled = auto + review
         print("\n[+] Propagation complete:")
         print(f"    - Prototypes used : {len(prototypes)}")
         print(f"    - Auto-accepted   : {auto}")
@@ -505,6 +649,9 @@ class PatchPropagator:
         print(f"    - Rejected        : {rejected}")
         if suppressed:
             print(f"    - Skipped         : {suppressed} previously rejected by a human")
+        if labelled:
+            print(f"    - Objects boxed   : {objects} across {labelled} image(s)")
+            print(f"                        ({objects / labelled:.2f} per labelled image)")
         print(f"[*] Heatmap overlays written to {self.debug_dir} for visual inspection.")
 
         if review:
