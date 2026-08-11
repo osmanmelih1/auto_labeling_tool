@@ -56,8 +56,10 @@ class ImageDeduplicator:
         return duplicates
 
     def process_and_save_uniques(self) -> None:
-        """Filters out duplicate images and copies only the unique ones
-        to the designated output directory.
+        """Copy only the unique images to the output directory.
+
+        Every image flagged as a duplicate of one already kept is skipped, so the
+        output holds exactly one representative of each visually distinct frame.
         """
         duplicates_dict = self.find_duplicates()
         images_to_ignore: set[str] = set()

@@ -1,11 +1,17 @@
-"""Module: app.py
-Description: Main Desktop GUI for the Auto Labeling Tool.
-             Features an industry-standard QGraphicsView canvas, saves confirmed
-             bounding boxes to a JSON file for Step 3b, and includes a full
-             Review Queue panel for human-in-the-loop confirmation of borderline
-             propagated labels. Fully localized in English.
+"""Main desktop GUI for the Auto Labeling Tool.
+
+Provides the two things the pipeline cannot do on its own: a canvas for drawing
+seed boxes by hand, and a review screen where a human accepts or rejects the
+borderline labels Step 4 produced.
+
+The GUI never imports a step's internals. It launches each one as a separate
+process and communicates through the same files the steps use between
+themselves, so the decoupled architecture holds across the UI boundary too. The
+only exception is the confidence thresholds, which are imported from Step 4 so
+the numbers shown to the user cannot drift from the ones actually applied.
 """
 
+import contextlib
 import json
 import os
 import subprocess
@@ -151,12 +157,23 @@ class WorkerThread(QThread):
 
 
 class ZoomableGraphicsView(QGraphicsView):
-    """Professional Canvas with Zoom, Pan, Crosshairs, and Confirmation mechanics."""
+    """Annotation canvas with zoom, pan, crosshairs and two-stage box confirmation.
+
+    A drawn box is not emitted immediately. It first becomes a pending box the
+    user must confirm with Enter or discard with Escape, because a stray drag
+    would otherwise write a seed label, and a bad seed poisons the prototype pool
+    for the whole propagation run.
+
+    Attributes:
+        box_drawn_signal: Emitted with the confirmed box in scene coordinates.
+        status_msg_signal: Emitted with short status text for the console panel.
+    """
 
     box_drawn_signal = pyqtSignal(QRect)
     status_msg_signal = pyqtSignal(str)
 
     def __init__(self):
+        """Configure the scene, render hints and interaction state."""
         super().__init__()
         self.scene = QGraphicsScene(self)
         self.setScene(self.scene)
@@ -183,6 +200,11 @@ class ZoomableGraphicsView(QGraphicsView):
         self._pan_start = QPoint()
 
     def load_image(self, image_path):
+        """Replace the canvas contents with an image, fitted to the viewport.
+
+        Args:
+            image_path: Path to the image to display.
+        """
         self.scene.clear()
         self.current_rect_item = None
         self.pending_rect_item = None
@@ -194,6 +216,12 @@ class ZoomableGraphicsView(QGraphicsView):
         self.fitInView(self.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
     def drawForeground(self, painter, rect):
+        """Draw the crosshair that follows the cursor.
+
+        Args:
+            painter: Painter supplied by Qt for the foreground layer.
+            rect: Exposed scene rectangle to paint over.
+        """
         super().drawForeground(painter, rect)
 
         if self.mouse_pos and not self._is_panning and self.image_item:
@@ -208,20 +236,26 @@ class ZoomableGraphicsView(QGraphicsView):
             painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
 
     def wheelEvent(self, event):
+        """Zoom around the cursor in response to the scroll wheel.
+
+        Args:
+            event: Qt wheel event.
+        """
         if not self.image_item:
             return
 
         zoom_in_factor = 1.15
         zoom_out_factor = 1.0 / zoom_in_factor
-
-        if event.angleDelta().y() > 0:
-            zoom_factor = zoom_in_factor
-        else:
-            zoom_factor = zoom_out_factor
+        zoom_factor = zoom_in_factor if event.angleDelta().y() > 0 else zoom_out_factor
 
         self.scale(zoom_factor, zoom_factor)
 
     def mousePressEvent(self, event):
+        """Start panning on right/middle click, or start a new box on left click.
+
+        Args:
+            event: Qt mouse event.
+        """
         if not self.image_item:
             return
 
@@ -249,6 +283,11 @@ class ZoomableGraphicsView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        """Track the cursor, pan the view, or resize the box being drawn.
+
+        Args:
+            event: Qt mouse event.
+        """
         self.mouse_pos = self.mapToScene(event.pos())
         self.viewport().update()
 
@@ -270,6 +309,13 @@ class ZoomableGraphicsView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        """Finish panning, or promote a large enough box to pending confirmation.
+
+        Boxes smaller than a few pixels are discarded as accidental clicks.
+
+        Args:
+            event: Qt mouse event.
+        """
         if event.button() in [Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton]:
             self._is_panning = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -296,6 +342,11 @@ class ZoomableGraphicsView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event):
+        """Confirm the pending box with Enter, or discard it with Escape.
+
+        Args:
+            event: Qt key event.
+        """
         if self.pending_rect_item:
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 pen = QPen(QColor(0, 255, 0), 2)
@@ -327,6 +378,12 @@ class ReviewCardWidget(QFrame):
     THUMB_SIZE = 88
 
     def __init__(self, entry: dict, parent=None):
+        """Build the card from one review queue entry.
+
+        Args:
+            entry: Queue record with the image key, score and source seed.
+            parent: Optional Qt parent widget.
+        """
         super().__init__(parent)
         self.entry = entry
         self.image_key = entry["image_key"]
@@ -340,6 +397,7 @@ class ReviewCardWidget(QFrame):
         self._build_ui()
 
     def _build_ui(self):
+        """Assemble the thumbnail, score readout, confidence bar and action buttons."""
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(12)
@@ -403,7 +461,10 @@ class ReviewCardWidget(QFrame):
         accept_btn = QPushButton("✓ Accept")
         accept_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         accept_btn.setStyleSheet("""
-            QPushButton { background-color:#198754; color:white; border:none; padding:6px 12px; border-radius:5px; font-size:12px; font-weight:bold; }
+            QPushButton {
+                background-color:#198754; color:white; border:none;
+                padding:6px 12px; border-radius:5px; font-size:12px; font-weight:bold;
+            }
             QPushButton:hover { background-color:#157347; }
         """)
         accept_btn.clicked.connect(lambda: self.accepted_signal.emit(self.image_key))
@@ -411,7 +472,10 @@ class ReviewCardWidget(QFrame):
         reject_btn = QPushButton("✗ Reject")
         reject_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         reject_btn.setStyleSheet("""
-            QPushButton { background-color:#dc3545; color:white; border:none; padding:6px 12px; border-radius:5px; font-size:12px; font-weight:bold; }
+            QPushButton {
+                background-color:#dc3545; color:white; border:none;
+                padding:6px 12px; border-radius:5px; font-size:12px; font-weight:bold;
+            }
             QPushButton:hover { background-color:#bb2d3b; }
         """)
         reject_btn.clicked.connect(lambda: self.rejected_signal.emit(self.image_key))
@@ -422,6 +486,15 @@ class ReviewCardWidget(QFrame):
 
     @staticmethod
     def _score_color(score: float) -> str:
+        """Pick a colour showing how close a score is to the auto-accept threshold.
+
+        Args:
+            score: Patch similarity score of the queued match.
+
+        Returns:
+            str: Hex colour, green when nearly auto-accepted, orange when barely
+            above the review threshold.
+        """
         if score >= AUTO_ACCEPT_THRESHOLD - 0.02:
             return "#4caf50"
         elif score >= (REVIEW_THRESHOLD + AUTO_ACCEPT_THRESHOLD) / 2:
@@ -430,6 +503,11 @@ class ReviewCardWidget(QFrame):
             return "#ff7043"
 
     def mousePressEvent(self, event):
+        """Select this card so the preview pane shows its image.
+
+        Args:
+            event: Qt mouse event.
+        """
         self.selected_signal.emit(self.entry)
         super().mousePressEvent(event)
 
@@ -438,6 +516,12 @@ class ReviewQueueDialog(QDialog):
     """Full Review Queue screen: scrollable card list and live preview pane."""
 
     def __init__(self, parent=None, review_queue_path: str = "data/review_queue.json"):
+        """Load the queue from disk and build the review UI.
+
+        Args:
+            parent: Optional Qt parent, used to reach the console for logging.
+            review_queue_path: JSON file written by the propagation step.
+        """
         super().__init__(parent)
         self.setWindowTitle("Review Queue — Pending Auto-Labels")
         self.resize(1250, 780)
@@ -454,6 +538,11 @@ class ReviewQueueDialog(QDialog):
         self._populate_cards()
 
     def _load_queue(self) -> dict:
+        """Read the queue file, tolerating a missing or corrupt document.
+
+        Returns:
+            dict: The queue, always containing a ``pending`` mapping.
+        """
         if self.review_queue_path.exists():
             try:
                 with open(self.review_queue_path) as f:
@@ -463,15 +552,20 @@ class ReviewQueueDialog(QDialog):
         return {"pending": {}}
 
     def _save_queue(self) -> None:
+        """Write the queue back to disk after an accept or reject."""
         self.review_queue_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.review_queue_path, "w") as f:
             json.dump(self.queue_data, f, indent=2)
 
     def _build_ui(self):
+        """Assemble the card list, sort control, bulk actions and preview pane."""
         self.setStyleSheet("""
             QDialog { background-color:#1e1e1e; }
             QLabel { color:white; }
-            QComboBox { background-color:#2b2b2b; color:white; border:1px solid #444; padding:5px; border-radius:4px; }
+            QComboBox {
+                background-color:#2b2b2b; color:white;
+                border:1px solid #444; padding:5px; border-radius:4px;
+            }
         """)
 
         main_layout = QHBoxLayout(self)
@@ -515,7 +609,10 @@ class ReviewQueueDialog(QDialog):
         bulk_accept_btn = QPushButton("Accept All")
         bulk_accept_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         bulk_accept_btn.setStyleSheet("""
-            QPushButton { background-color:#198754; color:white; padding:9px; border-radius:5px; font-weight:bold; }
+            QPushButton {
+                background-color:#198754; color:white;
+                padding:9px; border-radius:5px; font-weight:bold;
+            }
             QPushButton:hover { background-color:#157347; }
         """)
         bulk_accept_btn.clicked.connect(self._bulk_accept)
@@ -523,7 +620,10 @@ class ReviewQueueDialog(QDialog):
         bulk_reject_btn = QPushButton("Reject All")
         bulk_reject_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         bulk_reject_btn.setStyleSheet("""
-            QPushButton { background-color:#dc3545; color:white; padding:9px; border-radius:5px; font-weight:bold; }
+            QPushButton {
+                background-color:#dc3545; color:white;
+                padding:9px; border-radius:5px; font-weight:bold;
+            }
             QPushButton:hover { background-color:#bb2d3b; }
         """)
         bulk_reject_btn.clicked.connect(self._bulk_reject)
@@ -560,6 +660,11 @@ class ReviewQueueDialog(QDialog):
         main_layout.addLayout(right_panel, stretch=3)
 
     def _populate_cards(self):
+        """Rebuild the card list from the queue in the currently selected order.
+
+        Cards are recreated rather than reordered because the queue can change
+        underneath the dialog while a propagation run is finishing.
+        """
         while self.scroll_layout.count() > 1:
             item = self.scroll_layout.takeAt(0)
             widget = item.widget()
@@ -598,6 +703,11 @@ class ReviewQueueDialog(QDialog):
             self.cards[entry["image_key"]] = card
 
     def _show_preview(self, entry: dict):
+        """Show the selected image with its propagated box drawn over it.
+
+        Args:
+            entry: The queue record backing the clicked card.
+        """
         self._selected_key = entry.get("image_key")
         img_path = entry.get("image_path")
         label_path = entry.get("label_path")
@@ -628,6 +738,11 @@ class ReviewQueueDialog(QDialog):
         )
 
     def _accept_one(self, image_key: str):
+        """Accept a queued label, leaving the file on disk and clearing the entry.
+
+        Args:
+            image_key: Key of the entry to accept.
+        """
         entry = self.queue_data.get("pending", {}).pop(image_key, None)
         if entry is None:
             return
@@ -637,6 +752,14 @@ class ReviewQueueDialog(QDialog):
         self._log(f"[+] Accepted: {image_key} (score: {entry.get('score')})")
 
     def _reject_one(self, image_key: str):
+        """Reject a queued label and delete the .txt file it produced.
+
+        Deleting matters: a rejected label left on disk would be picked up as a
+        seed prototype by the next propagation run.
+
+        Args:
+            image_key: Key of the entry to reject.
+        """
         entry = self.queue_data.get("pending", {}).pop(image_key, None)
         if entry is None:
             return
@@ -652,6 +775,11 @@ class ReviewQueueDialog(QDialog):
         self._log(f"[-] Rejected and label removed: {image_key} (score: {entry.get('score')})")
 
     def _remove_card(self, image_key: str):
+        """Remove one card from the list and refresh the pending counter.
+
+        Args:
+            image_key: Key of the card to remove.
+        """
         card = self.cards.pop(image_key, None)
         if card:
             card.deleteLater()
@@ -669,6 +797,7 @@ class ReviewQueueDialog(QDialog):
             self._populate_cards()
 
     def _bulk_accept(self):
+        """Accept every pending entry after confirming with the user."""
         keys = list(self.queue_data.get("pending", {}).keys())
         if not keys:
             return
@@ -690,6 +819,7 @@ class ReviewQueueDialog(QDialog):
         self._log(f"[+] {len(keys)} images accepted in bulk.")
 
     def _bulk_reject(self):
+        """Reject every pending entry after confirming, deleting their label files."""
         keys = list(self.queue_data.get("pending", {}).keys())
         if not keys:
             return
@@ -708,21 +838,29 @@ class ReviewQueueDialog(QDialog):
             if entry:
                 label_path = entry.get("label_path")
                 if label_path and os.path.exists(label_path):
-                    try:
+                    with contextlib.suppress(OSError):
                         os.remove(label_path)
-                    except OSError:
-                        pass
         self.session_rejected += len(keys)
         self._save_queue()
         self._populate_cards()
         self._log(f"[-] {len(keys)} images rejected in bulk and labels deleted.")
 
     def _log(self, message: str):
+        """Forward a message to the main window's console, if there is one.
+
+        Args:
+            message: Text to append, without a trailing newline.
+        """
         parent = self.parent()
         if parent and hasattr(parent, "append_log"):
             parent.append_log(message + "\n")
 
     def closeEvent(self, event):
+        """Report the session tally to the console before the dialog closes.
+
+        Args:
+            event: Qt close event.
+        """
         if self.session_accepted or self.session_rejected:
             self._log(
                 f"[*] Review Queue session closed. "
@@ -732,7 +870,10 @@ class ReviewQueueDialog(QDialog):
 
 
 class AutoLabelingApp(QMainWindow):
+    """Main window: pipeline controls, annotation canvas and console output."""
+
     def __init__(self):
+        """Build the window and show the current review queue count."""
         super().__init__()
         self.setWindowTitle("Auto Labeling Tool - Pro Canvas GUI")
         self.resize(1100, 800)
@@ -741,6 +882,7 @@ class AutoLabelingApp(QMainWindow):
         self.update_review_badge()
 
     def setup_ui(self):
+        """Lay out the sidebar, canvas and console panels."""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
@@ -752,16 +894,25 @@ class AutoLabelingApp(QMainWindow):
         sidebar_frame.setStyleSheet("""
             QFrame { background-color: #2b2b2b; border-right: 1px solid #1e1e1e; }
             QLabel { color: #ffffff; font-size: 18px; font-weight: bold; }
-            QPushButton { background-color: #0d6efd; color: white; border: none; padding: 10px; border-radius: 5px; font-size: 14px; margin: 5px 10px; }
+            QPushButton {
+                background-color: #0d6efd; color: white; border: none; padding: 10px;
+                border-radius: 5px; font-size: 14px; margin: 5px 10px;
+            }
             QPushButton:hover { background-color: #0b5ed7; }
             QPushButton:disabled { background-color: #5c636a; color: #ced4da; }
             QPushButton#loadBtn { background-color: #198754; }
             QPushButton#loadBtn:hover { background-color: #157347; }
             QPushButton#reviewBtn { background-color: #fd7e14; }
             QPushButton#reviewBtn:hover { background-color: #dc6502; }
-            QComboBox { background-color: #3b3b3b; color: white; border: 1px solid #555; padding: 5px; border-radius: 3px; font-size: 14px; margin: 5px 10px; }
+            QComboBox {
+                background-color: #3b3b3b; color: white; border: 1px solid #555;
+                padding: 5px; border-radius: 3px; font-size: 14px; margin: 5px 10px;
+            }
             QComboBox::drop-down { border: 0px; }
-            QLineEdit { background-color: #3b3b3b; color: white; border: 1px solid #555; padding: 6px; border-radius: 3px; font-size: 14px; margin: 5px 10px; }
+            QLineEdit {
+                background-color: #3b3b3b; color: white; border: 1px solid #555;
+                padding: 6px; border-radius: 3px; font-size: 14px; margin: 5px 10px;
+            }
         """)
 
         sidebar_layout = QVBoxLayout(sidebar_frame)
@@ -841,6 +992,7 @@ class AutoLabelingApp(QMainWindow):
         main_layout.addWidget(splitter)
 
     def open_image_dialog(self):
+        """Ask the user for an image and load it onto the canvas."""
         default_dir = os.path.abspath("data/deduplicated")
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Select Test Image", default_dir, "Images (*.png *.jpg *.jpeg)"
@@ -854,6 +1006,14 @@ class AutoLabelingApp(QMainWindow):
             self.canvas.setFocus()
 
     def on_box_drawn(self, rect: QRect):
+        """Write a confirmed canvas box to the file Step 3b reads.
+
+        The box is handed over as JSON rather than by calling into the step, so
+        the GUI and the step stay decoupled.
+
+        Args:
+            rect: Confirmed box in image pixel coordinates.
+        """
         selected_class_text = self.class_combo.currentText()
         class_id = int(selected_class_text.split(" - ")[0])
 
@@ -874,14 +1034,29 @@ class AutoLabelingApp(QMainWindow):
         self.append_log("[*] Data saved! You can now click '3b. Manual Seeding' to generate the YOLO mask.\n")
 
     def set_buttons_state(self, enabled: bool):
+        """Enable or disable every action button.
+
+        Args:
+            enabled: False while a step is running, to prevent overlapping runs.
+        """
         for btn in self.buttons:
             btn.setEnabled(enabled)
         self.btn_load.setEnabled(enabled)
 
     def append_log_newline(self, text):
+        """Append a console line, adding the trailing newline.
+
+        Args:
+            text: Message without a trailing newline.
+        """
         self.append_log(text + "\n")
 
     def append_log(self, text):
+        """Append text to the console and keep the view scrolled to the end.
+
+        Args:
+            text: Raw text to insert, newlines included.
+        """
         cursor = self.log_textbox.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         cursor.insertText(text)
@@ -898,7 +1073,8 @@ class AutoLabelingApp(QMainWindow):
             prompt_text = self.prompt_input.text().strip()
             if not prompt_text:
                 self.append_log(
-                    "[-] Warning: Prompt box is empty! Please type a prompt (e.g., 'box') before running Step 3a.\n"
+                    "[-] Warning: Prompt box is empty! Please type a prompt "
+                    "(e.g., 'box') before running Step 3a.\n"
                 )
                 return
             if not self.current_image_path:
@@ -926,6 +1102,11 @@ class AutoLabelingApp(QMainWindow):
         self.worker.start()
 
     def on_script_finished(self, returncode):
+        """Re-enable the UI and refresh the queue badge once a step exits.
+
+        Args:
+            returncode: Process exit code, zero on success.
+        """
         if returncode == 0:
             self.append_log("\n[+] Process finished successfully.\n")
         else:
@@ -935,11 +1116,13 @@ class AutoLabelingApp(QMainWindow):
         self.update_review_badge()
 
     def open_review_queue(self):
+        """Open the review dialog and refresh the badge when it closes."""
         dialog = ReviewQueueDialog(self)
         dialog.exec()
         self.update_review_badge()
 
     def update_review_badge(self):
+        """Show the number of pending reviews on the Review Queue button."""
         count = 0
         review_path = Path("data/review_queue.json")
         if review_path.exists():
