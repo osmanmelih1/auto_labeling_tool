@@ -1,5 +1,4 @@
-"""
-Module: app.py
+"""Module: app.py
 Description: Main Desktop GUI for the Auto Labeling Tool.
              Features an industry-standard QGraphicsView canvas, saves confirmed
              bounding boxes to a JSON file for Step 3b, and includes a full
@@ -7,21 +6,35 @@ Description: Main Desktop GUI for the Auto Labeling Tool.
              propagated labels. Fully localized in English.
 """
 
-import sys
+import json
 import os
 import subprocess
-import json
+import sys
 from pathlib import Path
-from typing import Optional
 
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QTextEdit, QLabel, QFrame, QSplitter, QFileDialog,
-    QGraphicsView, QGraphicsScene, QComboBox, QDialog, QScrollArea,
-    QMessageBox, QProgressBar, QLineEdit
+    QApplication,
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFrame,
+    QGraphicsScene,
+    QGraphicsView,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSplitter,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QPoint, QRect, QRectF, QPointF
-from PyQt6.QtGui import QPixmap, QPen, QColor, QPainter
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -34,14 +47,14 @@ except Exception:
 
 
 CLASS_COLORS = {
-    0: QColor(255, 165, 0),    # Orange  -> "0 - Box"
-    1: QColor(0, 191, 255),    # Cyan    -> "1 - Pallet"
-    2: QColor(255, 0, 255),    # Magenta -> "2 - Other"
+    0: QColor(255, 165, 0),  # Orange  -> "0 - Box"
+    1: QColor(0, 191, 255),  # Cyan    -> "1 - Pallet"
+    2: QColor(255, 0, 255),  # Magenta -> "2 - Other"
 }
 DEFAULT_BOX_COLOR = QColor(255, 255, 0)
 
 
-def draw_yolo_boxes_on_pixmap(pixmap: QPixmap, label_path: Optional[str]) -> QPixmap:
+def draw_yolo_boxes_on_pixmap(pixmap: QPixmap, label_path: str | None) -> QPixmap:
     """Reads a YOLO .txt label file and draws every box onto a copy of the pixmap."""
     result = QPixmap(pixmap)
 
@@ -53,7 +66,7 @@ def draw_yolo_boxes_on_pixmap(pixmap: QPixmap, label_path: Optional[str]) -> QPi
         return result
 
     try:
-        with open(label_path, "r") as f:
+        with open(label_path) as f:
             lines = [line.strip() for line in f if line.strip()]
     except OSError:
         return result
@@ -98,6 +111,7 @@ def draw_yolo_boxes_on_pixmap(pixmap: QPixmap, label_path: Optional[str]) -> QPi
 
 class WorkerThread(QThread):
     """Runs heavy AI scripts in the background and sends output to the GUI console."""
+
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(int)
 
@@ -113,7 +127,7 @@ class WorkerThread(QThread):
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                universal_newlines=True
+                universal_newlines=True,
             )
             for line in process.stdout:
                 self.log_signal.emit(line)
@@ -126,6 +140,7 @@ class WorkerThread(QThread):
 
 class ZoomableGraphicsView(QGraphicsView):
     """Professional Canvas with Zoom, Pan, Crosshairs, and Confirmation mechanics."""
+
     box_drawn_signal = pyqtSignal(QRect)
     status_msg_signal = pyqtSignal(str)
 
@@ -292,6 +307,7 @@ class ZoomableGraphicsView(QGraphicsView):
 
 class ReviewCardWidget(QFrame):
     """A single row in the Review Queue list: thumbnail + score + confidence bar + actions."""
+
     selected_signal = pyqtSignal(dict)
     accepted_signal = pyqtSignal(str)
     rejected_signal = pyqtSignal(str)
@@ -324,9 +340,10 @@ class ReviewCardWidget(QFrame):
         img_path = self.entry.get("image_path")
         if img_path and os.path.exists(img_path):
             pixmap = QPixmap(img_path).scaled(
-                self.THUMB_SIZE, self.THUMB_SIZE,
+                self.THUMB_SIZE,
+                self.THUMB_SIZE,
                 Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation
+                Qt.TransformationMode.SmoothTransformation,
             )
             thumb_label.setPixmap(pixmap)
         else:
@@ -427,7 +444,7 @@ class ReviewQueueDialog(QDialog):
     def _load_queue(self) -> dict:
         if self.review_queue_path.exists():
             try:
-                with open(self.review_queue_path, "r") as f:
+                with open(self.review_queue_path) as f:
                     return json.load(f)
             except json.JSONDecodeError:
                 pass
@@ -459,11 +476,13 @@ class ReviewQueueDialog(QDialog):
         header_layout.addStretch()
 
         self.sort_combo = QComboBox()
-        self.sort_combo.addItems([
-            "Score: High → Low",
-            "Score: Low → High",
-            "Date: New → Old",
-        ])
+        self.sort_combo.addItems(
+            [
+                "Score: High → Low",
+                "Score: Low → High",
+                "Date: New → Old",
+            ]
+        )
         self.sort_combo.currentIndexChanged.connect(self._populate_cards)
         header_layout.addWidget(self.sort_combo)
         left_panel.addLayout(header_layout)
@@ -580,8 +599,10 @@ class ReviewQueueDialog(QDialog):
         pixmap = QPixmap(img_path)
         pixmap = draw_yolo_boxes_on_pixmap(pixmap, label_path)
         scaled = pixmap.scaled(
-            self.preview_label.width(), self.preview_label.height(),
-            Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            self.preview_label.width(),
+            self.preview_label.height(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
         )
         self.preview_label.setPixmap(scaled)
 
@@ -640,10 +661,11 @@ class ReviewQueueDialog(QDialog):
         if not keys:
             return
         confirm = QMessageBox.question(
-            self, "Accept All",
+            self,
+            "Accept All",
             f"Are you sure you want to accept all {len(keys)} images?\n"
             f"(Labels are already copied; they will simply be cleared from the queue.)",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
@@ -660,10 +682,11 @@ class ReviewQueueDialog(QDialog):
         if not keys:
             return
         confirm = QMessageBox.question(
-            self, "Reject All",
+            self,
+            "Reject All",
             f"Are you sure you want to reject all {len(keys)} images?\n"
             f"(All corresponding .txt label files will be deleted from disk.)",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
@@ -757,7 +780,7 @@ class AutoLabelingApp(QMainWindow):
             ("2. Embedding (VDB)", "src/core/step2_embedding.py"),
             ("3a. Text Prompting", "src/core/step3a_text_prompting.py"),
             ("3b. Manual Seeding", "src/core/step3b_manual_seeding.py"),
-            ("4. Propagation", "src/core/step4_propagation.py")
+            ("4. Propagation", "src/core/step4_propagation.py"),
         ]
 
         for text, path in steps:
@@ -825,7 +848,7 @@ class AutoLabelingApp(QMainWindow):
         seed_data = {
             "image_path": self.current_image_path,
             "class_id": class_id,
-            "bbox": [rect.x(), rect.y(), rect.width(), rect.height()]
+            "bbox": [rect.x(), rect.y(), rect.width(), rect.height()],
         }
 
         os.makedirs("data", exist_ok=True)
@@ -833,7 +856,9 @@ class AutoLabelingApp(QMainWindow):
             json.dump(seed_data, f)
 
         self.append_log(f"[+] Box Confirmed! Class: {class_id} ({selected_class_text})\n")
-        self.append_log(f"    Coordinates -> X:{rect.x()}, Y:{rect.y()}, W:{rect.width()}, H:{rect.height()}\n")
+        self.append_log(
+            f"    Coordinates -> X:{rect.x()}, Y:{rect.y()}, W:{rect.width()}, H:{rect.height()}\n"
+        )
         self.append_log("[*] Data saved! You can now click '3b. Manual Seeding' to generate the YOLO mask.\n")
 
     def set_buttons_state(self, enabled: bool):
@@ -855,26 +880,26 @@ class AutoLabelingApp(QMainWindow):
         if "step3a" in script_path:
             prompt_text = self.prompt_input.text().strip()
             if not prompt_text:
-                self.append_log("[-] Warning: Prompt box is empty! Please type a prompt (e.g., 'box') before running Step 3a.\n")
+                self.append_log(
+                    "[-] Warning: Prompt box is empty! Please type a prompt (e.g., 'box') before running Step 3a.\n"
+                )
                 return
             if not self.current_image_path:
                 self.append_log("[-] Warning: No image loaded! Please load an image first.\n")
                 return
-            
+
             # Extract class ID dynamically from the UI
             selected_class_text = self.class_combo.currentText()
             class_id = int(selected_class_text.split(" - ")[0])
-            
+
             os.makedirs("data", exist_ok=True)
             with open("data/current_prompt.json", "w") as f:
-                json.dump({
-                    "prompt": prompt_text, 
-                    "image_path": self.current_image_path,
-                    "class_id": class_id
-                }, f)
+                json.dump(
+                    {"prompt": prompt_text, "image_path": self.current_image_path, "class_id": class_id}, f
+                )
             self.append_log(f"[*] Prompt saved for Step 3a: '{prompt_text}'\n")
 
-        self.append_log(f"\n[{'='*40}]\n")
+        self.append_log(f"\n[{'=' * 40}]\n")
         self.append_log(f"[*] Executing: {script_path}\n")
 
         self.set_buttons_state(False)
@@ -885,7 +910,7 @@ class AutoLabelingApp(QMainWindow):
 
     def on_script_finished(self, returncode):
         if returncode == 0:
-            self.append_log(f"\n[+] Process finished successfully.\n")
+            self.append_log("\n[+] Process finished successfully.\n")
         else:
             self.append_log(f"\n[!] Process ended with error code: {returncode}\n")
 
@@ -902,7 +927,7 @@ class AutoLabelingApp(QMainWindow):
         review_path = Path("data/review_queue.json")
         if review_path.exists():
             try:
-                with open(review_path, "r") as f:
+                with open(review_path) as f:
                     data = json.load(f)
                 count = len(data.get("pending", {}))
             except (json.JSONDecodeError, OSError):

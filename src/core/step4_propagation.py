@@ -1,12 +1,11 @@
-"""
-Module: step4_propagation.py
+"""Module: step4_propagation.py
 Description: Multi-Seed Confidence-Tiered Label Propagation (Path B).
-             Loads the Master VDB and scans the 'data/labels' directory to identify ALL 
-             existing labeled images (the Seed Pool). It then compares every unlabelled 
-             image against ALL seeds in the pool, finds the best match (highest cosine 
+             Loads the Master VDB and scans the 'data/labels' directory to identify ALL
+             existing labeled images (the Seed Pool). It then compares every unlabelled
+             image against ALL seeds in the pool, finds the best match (highest cosine
              similarity), and propagates the YOLO label based on Confidence Tiers.
 
-             This creates an "Avalanche Effect" for Active Learning: 
+             This creates an "Avalanche Effect" for Active Learning:
              10 seeds -> prop -> 150 labels -> prop -> 1500 labels.
 
                - AUTO-ACCEPT  (score >= 0.92)
@@ -14,24 +13,24 @@ Description: Multi-Seed Confidence-Tiered Label Propagation (Path B).
                - REJECTED     (score < 0.82)
 """
 
+import json
 import os
 import shutil
-import json
-import numpy as np
+from datetime import UTC, datetime
 from pathlib import Path
-from datetime import datetime, timezone
-from typing import Optional, List, Tuple
+
+import numpy as np
 
 # --- Confidence Tier Configuration ---
-AUTO_ACCEPT_THRESHOLD = 0.92   # >= this score: direct automatic acceptance
-REVIEW_THRESHOLD = 0.82        # >= this and < AUTO: copied as draft, awaits human review
-                               # < REVIEW_THRESHOLD: rejected, ignored
+AUTO_ACCEPT_THRESHOLD = 0.92  # >= this score: direct automatic acceptance
+REVIEW_THRESHOLD = 0.82  # >= this and < AUTO: copied as draft, awaits human review
+# < REVIEW_THRESHOLD: rejected, ignored
 
 IMAGE_DIR = "data/deduplicated"
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
 
 
-def resolve_image_path(image_dir: str, image_key: str) -> Optional[str]:
+def resolve_image_path(image_dir: str, image_key: str) -> str | None:
     """Finds the actual image file path for a given extensionless image_key."""
     for ext in IMAGE_EXTENSIONS:
         candidate = os.path.join(image_dir, image_key + ext)
@@ -50,7 +49,7 @@ class VDBPropagator:
         self.vdb_path = vdb_path
         self.review_queue_path = Path(review_queue_path)
         self.image_dir = image_dir
-        
+
         print(f"[*] Loading Master VDB from {vdb_path}...")
         if not os.path.exists(vdb_path):
             raise FileNotFoundError(f"[!] VDB not found at {vdb_path}. Run Step 2 first.")
@@ -70,7 +69,7 @@ class VDBPropagator:
 
     def _load_review_queue(self) -> dict:
         if self.review_queue_path.exists():
-            with open(self.review_queue_path, "r") as f:
+            with open(self.review_queue_path) as f:
                 try:
                     return json.load(f)
                 except json.JSONDecodeError:
@@ -85,15 +84,15 @@ class VDBPropagator:
     def propagate_all_seeds(self, label_dir: str):
         """Multi-Seed Propagation: Uses all existing labels as seeds to label the rest."""
         print(f"\n[*] Scanning for existing seeds in {label_dir}...")
-        
-        seed_pool: List[Tuple[str, np.ndarray, str]] = []
-        target_pool: List[Tuple[str, np.ndarray, str]] = []
+
+        seed_pool: list[tuple[str, np.ndarray, str]] = []
+        target_pool: list[tuple[str, np.ndarray, str]] = []
 
         # 1. Separate images into Seeds (has label) and Targets (no label)
         for img_key in self.image_names:
             label_path = os.path.join(label_dir, f"{img_key}.txt")
             emb = self.database[img_key]
-            
+
             if os.path.exists(label_path):
                 seed_pool.append((img_key, emb, label_path))
             else:
@@ -140,10 +139,12 @@ class VDBPropagator:
                     "label_path": os.path.abspath(target_label_path),
                     "image_path": resolve_image_path(self.image_dir, target_key),
                     "image_key": target_key,
-                    "flagged_at": datetime.now(timezone.utc).isoformat(),
+                    "flagged_at": datetime.now(UTC).isoformat(),
                     "status": "pending_review",
                 }
-                print(f"  [REVIEW] {target_key} -> Matched with '{best_seed_key}' | Score: {best_score:.4f} (AWAITING APPROVAL)")
+                print(
+                    f"  [REVIEW] {target_key} -> Matched with '{best_seed_key}' | Score: {best_score:.4f} (AWAITING APPROVAL)"
+                )
                 review_count += 1
 
             else:
@@ -156,7 +157,7 @@ class VDBPropagator:
         print(f"    - Auto-accepted   : {auto_count}")
         print(f"    - Review queue    : {review_count} (see {self.review_queue_path})")
         print(f"    - Rejected        : {rejected_count}")
-        
+
         if review_count > 0:
             print(f"[!] {review_count} image(s) awaiting human approval in the GUI 'Review Queue'.")
 

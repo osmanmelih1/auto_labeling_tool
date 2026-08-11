@@ -11,14 +11,12 @@ Output: ``data/deduplicated/``
 import os
 import shutil
 from pathlib import Path
-from typing import Dict, List, Set
 
 from imagededup.methods import CNN
 
 
 class ImageDeduplicator:
-    """
-    Identifies and filters out duplicate images in a given directory.
+    """Identifies and filters out duplicate images in a given directory.
 
     This class utilizes a Convolutional Neural Network (CNN) to extract features
     from images and compares them to find duplicates based on a similarity threshold.
@@ -30,8 +28,7 @@ class ImageDeduplicator:
     """
 
     def __init__(self, input_dir: str, output_dir: str) -> None:
-        """
-        Initializes the ImageDeduplicator and ensures the output directory exists.
+        """Initializes the ImageDeduplicator and ensures the output directory exists.
 
         Args:
             input_dir (str): Path to the source directory containing raw images.
@@ -43,9 +40,8 @@ class ImageDeduplicator:
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def find_duplicates(self) -> Dict[str, List[str]]:
-        """
-        Encodes images and finds duplicates based on structural similarity.
+    def find_duplicates(self) -> dict[str, list[str]]:
+        """Encodes images and finds duplicates based on structural similarity.
 
         Returns:
             Dict[str, List[str]]: A dictionary where the key is the image filename,
@@ -53,21 +49,18 @@ class ImageDeduplicator:
         """
         print(f"[*] Analyzing images in {self.input_dir}...")
         encodings = self.cnn.encode_images(image_dir=str(self.input_dir))
-        
+
         # Threshold can be adjusted; 0.95 is generally safe for near-duplicates
-        duplicates = self.cnn.find_duplicates(
-            encoding_map=encodings, min_similarity_threshold=0.95
-        )
-        
+        duplicates = self.cnn.find_duplicates(encoding_map=encodings, min_similarity_threshold=0.95)
+
         return duplicates
 
     def process_and_save_uniques(self) -> None:
-        """
-        Filters out duplicate images and copies only the unique ones 
+        """Filters out duplicate images and copies only the unique ones
         to the designated output directory.
         """
         duplicates_dict = self.find_duplicates()
-        images_to_ignore: Set[str] = set()
+        images_to_ignore: set[str] = set()
 
         for image_name, duplicate_list in duplicates_dict.items():
             if image_name not in images_to_ignore:
@@ -89,13 +82,13 @@ class ImageDeduplicator:
             src_path = self.input_dir / img
             dst_path = self.output_dir / img
             shutil.copy2(src_path, dst_path)
-            
+
         print(f"[+] Process complete. Unique images saved to {self.output_dir}.")
 
 
 if __name__ == "__main__":
     INPUT_FOLDER = "data/raw"
     OUTPUT_FOLDER = "data/deduplicated"
-    
+
     deduplicator = ImageDeduplicator(input_dir=INPUT_FOLDER, output_dir=OUTPUT_FOLDER)
     deduplicator.process_and_save_uniques()
