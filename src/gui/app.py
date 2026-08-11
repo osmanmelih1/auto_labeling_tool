@@ -31,6 +31,8 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -46,22 +48,39 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.core.class_config import class_color, class_name, load_classes, save_classes
+
 try:
     from src.core.step4_propagation import AUTO_ACCEPT_THRESHOLD, REVIEW_THRESHOLD
 except Exception:
-    AUTO_ACCEPT_THRESHOLD, REVIEW_THRESHOLD = 0.92, 0.82
+    AUTO_ACCEPT_THRESHOLD, REVIEW_THRESHOLD = 0.86, 0.78
 
 
-CLASS_COLORS = {
-    0: QColor(255, 165, 0),  # Orange  -> "0 - Box"
-    1: QColor(0, 191, 255),  # Cyan    -> "1 - Pallet"
-    2: QColor(255, 0, 255),  # Magenta -> "2 - Other"
-}
-DEFAULT_BOX_COLOR = QColor(255, 255, 0)
+def class_qcolor(class_id: int) -> QColor:
+    """Return the drawing colour for a class id.
+
+    Colours are generated from the id rather than read from a fixed table, so the
+    tool supports any number of classes in any project without a code change.
+
+    Args:
+        class_id: The class id to colour.
+
+    Returns:
+        QColor: A colour distinct from those of neighbouring class ids.
+    """
+    return QColor(*class_color(class_id))
 
 
 def draw_yolo_boxes_on_pixmap(pixmap: QPixmap, label_path: str | None) -> QPixmap:
-    """Reads a YOLO .txt label file and draws every box onto a copy of the pixmap."""
+    """Draw every box in a YOLO label file onto a copy of a pixmap.
+
+    Args:
+        pixmap: Source image; it is copied rather than modified.
+        label_path: Label file to read, or None to draw nothing.
+
+    Returns:
+        QPixmap: A copy of the pixmap with the boxes and class tags drawn on it.
+    """
     result = QPixmap(pixmap)
 
     if not label_path or not os.path.exists(label_path):
@@ -76,6 +95,8 @@ def draw_yolo_boxes_on_pixmap(pixmap: QPixmap, label_path: str | None) -> QPixma
             lines = [line.strip() for line in f if line.strip()]
     except OSError:
         return result
+
+    names = load_classes()
 
     painter = QPainter(result)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -95,7 +116,8 @@ def draw_yolo_boxes_on_pixmap(pixmap: QPixmap, label_path: str | None) -> QPixma
         x = (xc * img_w) - box_w / 2
         y = (yc * img_h) - box_h / 2
 
-        color = CLASS_COLORS.get(class_id, DEFAULT_BOX_COLOR)
+        color = class_qcolor(class_id)
+        label = class_name(names, class_id)
 
         pen = QPen(color, 3)
         pen.setCosmetic(True)
@@ -103,13 +125,14 @@ def draw_yolo_boxes_on_pixmap(pixmap: QPixmap, label_path: str | None) -> QPixma
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(QRectF(x, y, box_w, box_h))
 
-        tag_rect = QRectF(x, max(0, y - 22), 70, 20)
+        tag_width = max(70, 9 * len(label) + 16)
+        tag_rect = QRectF(x, max(0, y - 22), tag_width, 20)
         painter.setBrush(color)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRect(tag_rect)
 
         painter.setPen(QPen(QColor(0, 0, 0)))
-        painter.drawText(tag_rect, Qt.AlignmentFlag.AlignCenter, f"Class {class_id}")
+        painter.drawText(tag_rect, Qt.AlignmentFlag.AlignCenter, label)
 
     painter.end()
     return result
@@ -869,6 +892,165 @@ class ReviewQueueDialog(QDialog):
         super().closeEvent(event)
 
 
+class ClassManagerDialog(QDialog):
+    """Editor for the project's object classes.
+
+    Classes are data, not code: the same application has to label pallets in one
+    project and something entirely different in the next. They are therefore
+    edited here and stored in ``data/classes.json`` rather than being written
+    into the source.
+
+    A class's position in the list is its YOLO class id, so existing labels would
+    silently change meaning if entries were reordered or removed from the middle.
+    The dialog therefore only appends and renames, and refuses to delete anything
+    other than the last entry.
+    """
+
+    def __init__(self, parent=None):
+        """Load the current classes and build the editor.
+
+        Args:
+            parent: Optional Qt parent widget.
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Manage Classes")
+        self.resize(460, 420)
+        self.names = load_classes()
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self):
+        """Assemble the class list, the add field and the action buttons."""
+        self.setStyleSheet("""
+            QDialog { background-color:#1e1e1e; }
+            QLabel { color:white; }
+            QListWidget {
+                background-color:#2b2b2b; color:white;
+                border:1px solid #444; border-radius:4px; font-size:13px;
+            }
+            QLineEdit {
+                background-color:#3b3b3b; color:white; border:1px solid #555;
+                padding:6px; border-radius:3px; font-size:13px;
+            }
+            QPushButton {
+                background-color:#0d6efd; color:white; border:none;
+                padding:8px; border-radius:5px; font-size:13px;
+            }
+            QPushButton:hover { background-color:#0b5ed7; }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        header = QLabel("Object classes for this project")
+        header.setStyleSheet("font-size:16px; font-weight:bold;")
+        layout.addWidget(header)
+
+        hint = QLabel(
+            "A class's position is its YOLO class id, so existing labels depend on the "
+            "order. Renaming is always safe; only the last class can be removed."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#999999; font-size:11px;")
+        layout.addWidget(hint)
+
+        self.list_widget = QListWidget()
+        self.list_widget.itemChanged.connect(self._on_item_renamed)
+        layout.addWidget(self.list_widget, stretch=1)
+
+        add_row = QHBoxLayout()
+        self.new_input = QLineEdit()
+        self.new_input.setPlaceholderText("New class name")
+        self.new_input.returnPressed.connect(self._add_class)
+        add_row.addWidget(self.new_input, stretch=1)
+
+        add_btn = QPushButton("Add")
+        add_btn.clicked.connect(self._add_class)
+        add_row.addWidget(add_btn)
+        layout.addLayout(add_row)
+
+        action_row = QHBoxLayout()
+        remove_btn = QPushButton("Remove Last")
+        remove_btn.setStyleSheet("background-color:#dc3545;")
+        remove_btn.clicked.connect(self._remove_last)
+        action_row.addWidget(remove_btn)
+
+        save_btn = QPushButton("Save")
+        save_btn.setStyleSheet("background-color:#198754;")
+        save_btn.clicked.connect(self._save)
+        action_row.addWidget(save_btn)
+        layout.addLayout(action_row)
+
+    def _refresh(self):
+        """Rebuild the list widget from the in-memory class names."""
+        self.list_widget.blockSignals(True)
+        self.list_widget.clear()
+        for class_id, name in enumerate(self.names):
+            item = QListWidgetItem(f"{class_id}: {name}")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+            item.setForeground(class_qcolor(class_id))
+            item.setData(Qt.ItemDataRole.UserRole, class_id)
+            self.list_widget.addItem(item)
+        self.list_widget.blockSignals(False)
+
+        if not self.names:
+            self.list_widget.addItem("No classes defined yet.")
+
+    def _on_item_renamed(self, item: QListWidgetItem):
+        """Apply an inline rename, keeping the id prefix intact.
+
+        Args:
+            item: The edited list item.
+        """
+        class_id = item.data(Qt.ItemDataRole.UserRole)
+        if class_id is None:
+            return
+
+        text = item.text()
+        new_name = text.split(":", 1)[1].strip() if ":" in text else text.strip()
+        if new_name:
+            self.names[class_id] = new_name
+        self._refresh()
+
+    def _add_class(self):
+        """Append the name typed in the input field as a new class."""
+        name = self.new_input.text().strip()
+        if not name:
+            return
+        if name in self.names:
+            QMessageBox.warning(self, "Duplicate", f"'{name}' is already defined.")
+            return
+        self.names.append(name)
+        self.new_input.clear()
+        self._refresh()
+
+    def _remove_last(self):
+        """Remove the highest class id, after confirming with the user."""
+        if not self.names:
+            return
+        last_id = len(self.names) - 1
+        confirm = QMessageBox.question(
+            self,
+            "Remove Last Class",
+            f"Remove class {last_id} ('{self.names[last_id]}')?\n\n"
+            "Any existing label using this id will keep it and be exported under a "
+            "placeholder name.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            self.names.pop()
+            self._refresh()
+
+    def _save(self):
+        """Persist the class list and close the dialog."""
+        save_classes(self.names)
+        parent = self.parent()
+        if parent and hasattr(parent, "append_log"):
+            parent.append_log(f"[+] Saved {len(self.names)} class(es) to data/classes.json\n")
+        self.accept()
+
+
 class AutoLabelingApp(QMainWindow):
     """Main window: pipeline controls, annotation canvas and console output."""
 
@@ -879,6 +1061,7 @@ class AutoLabelingApp(QMainWindow):
         self.resize(1100, 800)
         self.current_image_path = None
         self.setup_ui()
+        self.refresh_class_combo()
         self.update_review_badge()
 
     def setup_ui(self):
@@ -904,6 +1087,10 @@ class AutoLabelingApp(QMainWindow):
             QPushButton#loadBtn:hover { background-color: #157347; }
             QPushButton#reviewBtn { background-color: #fd7e14; }
             QPushButton#reviewBtn:hover { background-color: #dc6502; }
+            QPushButton#classesBtn { background-color: #6c757d; font-size: 13px; }
+            QPushButton#classesBtn:hover { background-color: #5c636a; }
+            QPushButton#exportBtn { background-color: #6f42c1; }
+            QPushButton#exportBtn:hover { background-color: #5a32a3; }
             QComboBox {
                 background-color: #3b3b3b; color: white; border: 1px solid #555;
                 padding: 5px; border-radius: 3px; font-size: 14px; margin: 5px 10px;
@@ -923,12 +1110,15 @@ class AutoLabelingApp(QMainWindow):
         sidebar_layout.addWidget(logo_label)
 
         self.class_combo = QComboBox()
-        self.class_combo.addItems(["0 - Box", "1 - Pallet", "2 - Other"])
         sidebar_layout.addWidget(self.class_combo)
 
-        # --- TEXT PROMPT INPUT ---
+        self.btn_classes = QPushButton("Manage Classes")
+        self.btn_classes.setObjectName("classesBtn")
+        self.btn_classes.clicked.connect(self.open_class_manager)
+        sidebar_layout.addWidget(self.btn_classes)
+
         self.prompt_input = QLineEdit()
-        self.prompt_input.setPlaceholderText("Enter prompt (e.g., box)")
+        self.prompt_input.setPlaceholderText("Enter prompt (e.g., pallet)")
         sidebar_layout.addWidget(self.prompt_input)
 
         self.btn_load = QPushButton("Load Image")
@@ -957,6 +1147,12 @@ class AutoLabelingApp(QMainWindow):
         self.btn_review.clicked.connect(self.open_review_queue)
         sidebar_layout.addWidget(self.btn_review)
         self.buttons.append(self.btn_review)
+
+        self.btn_export = QPushButton("6. Export Dataset")
+        self.btn_export.setObjectName("exportBtn")
+        self.btn_export.clicked.connect(lambda: self.run_script("src.core.step5_export"))
+        sidebar_layout.addWidget(self.btn_export)
+        self.buttons.append(self.btn_export)
 
         sidebar_layout.addStretch()
 
@@ -1014,8 +1210,10 @@ class AutoLabelingApp(QMainWindow):
         Args:
             rect: Confirmed box in image pixel coordinates.
         """
-        selected_class_text = self.class_combo.currentText()
-        class_id = int(selected_class_text.split(" - ")[0])
+        class_id = self.selected_class_id()
+        if class_id is None:
+            self.append_log("[-] No classes defined. Use 'Manage Classes' to add one before drawing a box.\n")
+            return
 
         seed_data = {
             "image_path": self.current_image_path,
@@ -1027,7 +1225,7 @@ class AutoLabelingApp(QMainWindow):
         with open("data/temp_seed.json", "w") as f:
             json.dump(seed_data, f)
 
-        self.append_log(f"[+] Box Confirmed! Class: {class_id} ({selected_class_text})\n")
+        self.append_log(f"[+] Box Confirmed! Class: {self.class_combo.currentText()}\n")
         self.append_log(
             f"    Coordinates -> X:{rect.x()}, Y:{rect.y()}, W:{rect.width()}, H:{rect.height()}\n"
         )
@@ -1074,16 +1272,17 @@ class AutoLabelingApp(QMainWindow):
             if not prompt_text:
                 self.append_log(
                     "[-] Warning: Prompt box is empty! Please type a prompt "
-                    "(e.g., 'box') before running Step 3a.\n"
+                    "(e.g., 'pallet') before running Step 3a.\n"
                 )
                 return
             if not self.current_image_path:
                 self.append_log("[-] Warning: No image loaded! Please load an image first.\n")
                 return
 
-            # Extract class ID dynamically from the UI
-            selected_class_text = self.class_combo.currentText()
-            class_id = int(selected_class_text.split(" - ")[0])
+            class_id = self.selected_class_id()
+            if class_id is None:
+                self.append_log("[-] No classes defined. Use 'Manage Classes' to add one first.\n")
+                return
 
             os.makedirs("data", exist_ok=True)
             with open("data/current_prompt.json", "w") as f:
@@ -1114,6 +1313,42 @@ class AutoLabelingApp(QMainWindow):
 
         self.set_buttons_state(True)
         self.update_review_badge()
+
+    def refresh_class_combo(self):
+        """Rebuild the class dropdown from data/classes.json, preserving the selection.
+
+        The dropdown is data-driven so the tool can be pointed at any project's
+        classes without editing the source.
+        """
+        previous = self.class_combo.currentText()
+        names = load_classes()
+
+        self.class_combo.clear()
+        if names:
+            self.class_combo.addItems(f"{i} - {name}" for i, name in enumerate(names))
+            index = self.class_combo.findText(previous)
+            self.class_combo.setCurrentIndex(max(index, 0))
+        else:
+            self.class_combo.addItem("No classes - use 'Manage Classes'")
+
+        self.class_combo.setEnabled(bool(names))
+
+    def open_class_manager(self):
+        """Open the class editor and refresh anything that depends on the classes."""
+        ClassManagerDialog(self).exec()
+        self.refresh_class_combo()
+        if self.current_image_path:
+            self.canvas.load_image(self.current_image_path)
+
+    def selected_class_id(self) -> int | None:
+        """Return the class id chosen in the dropdown.
+
+        Returns:
+            int | None: The selected id, or None when no classes are defined.
+        """
+        if not self.class_combo.isEnabled():
+            return None
+        return self.class_combo.currentIndex()
 
     def open_review_queue(self):
         """Open the review dialog and refresh the badge when it closes."""

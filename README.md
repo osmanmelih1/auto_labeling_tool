@@ -40,10 +40,32 @@ data/raw/ ──[1]──> data/deduplicated/ ──[2]──> data/embeddings/e
 | 3b | `src/core/step3b_manual_seeding.py` | Manual seeding: GUI bounding box → SAM (box→mask) → YOLO label. |
 | 4 | `src/core/step4_propagation.py` | Patch-level propagation with localisation. |
 | 5 | `src/gui/app.py` (Review Queue) | Human-in-the-loop accept / reject for borderline matches. |
-| 6 | _planned_ | Dataset export (`step5_export.py`) and classifier / YOLO training. |
+| 6 | `src/core/step5_export.py` | Packages the labels into a YOLO dataset and writes `data.yaml`. |
+| 7 | _planned_ | YOLO training on the exported dataset. |
 
-`src/core/sam_engine.py` is a shared utility rather than a step: it loads SAM once
-and converts prompts to masks and masks to YOLO boxes for whichever step needs it.
+Two shared utilities sit outside the numbered steps:
+
+- `src/core/sam_engine.py` loads SAM once and converts prompts to masks and masks
+  to YOLO boxes for whichever step needs it.
+- `src/core/class_config.py` reads and writes the project's class definitions.
+
+### Defining classes
+
+The tool is dataset-agnostic, so no class name appears anywhere in the source.
+Classes live in `data/classes.json`, are edited through the GUI's **Manage
+Classes** button, and are read by both the annotation canvas and the exporter:
+
+```json
+{ "classes": ["pallet", "forklift"] }
+```
+
+A class's position in the list is its YOLO class id, so existing labels would
+change meaning if entries were reordered or removed from the middle. The class
+manager therefore only appends, renames, and removes the last entry. Box colours
+are generated from the class id rather than stored, so any number of classes gets
+a readable palette without a per-project colour table.
+
+Labelling a different domain means editing this file, not the code.
 
 ### How Step 4 locates an object
 
@@ -157,6 +179,10 @@ uv run python -m src.core.step4_propagation
      confirm, then run the step.
 5. **4. Propagation** — spread the seed labels across the unlabelled images.
 6. **5. Review Queue** — accept or reject the borderline results.
+7. **6. Export Dataset** — build `datasets/` and `data.yaml`, ready for training.
+
+Define your classes with **Manage Classes** before drawing the first box; the
+canvas and the exporter both read them from `data/classes.json`.
 
 **Canvas controls:** scroll to zoom, right-click drag to pan, left-click drag to draw a
 box, `Enter` to confirm, `Esc` to cancel.
