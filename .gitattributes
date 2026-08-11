@@ -1,0 +1,21 @@
+# Normalize all text files to LF in the repository and in the working tree.
+# Keeps diffs clean across Windows and Linux contributors.
+* text=auto eol=lf
+
+# Explicit text types
+*.py    text eol=lf
+*.toml  text eol=lf
+*.md    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.json  text eol=lf
+
+# Binary assets: never diff or convert
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.pth           binary
+*.pt            binary
+*.safetensors   binary
+*.npy           binary
+*.npz           binary
