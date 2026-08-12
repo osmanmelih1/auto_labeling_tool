@@ -338,14 +338,43 @@ is. Boxes are clamped to the image, so the padding is only somewhere to scroll.
 ## Development
 
 ```bash
+uv run pytest                # tests
 uv run ruff check .          # lint
 uv run ruff check . --fix    # autofix
 uv run ruff format .         # format
 ```
 
+### Tests
+
+68 tests, about a second, no GPU and no dataset. They run against a throwaway
+project directory, so they never read the operator's classes or delete the
+operator's labels.
+
+| File | What it protects |
+| --- | --- |
+| `test_yolo_format.py` | The label format every step reads and writes: round-trip precision, and that one malformed line does not discard the rest of the file. |
+| `test_review_queue.py` | Rejection memory. Too weak and a rejected frame returns on every run; too strong and one the tool has learned to recognise never gets a second chance. |
+| `test_label_editor.py` | The review canvas, asserted against the label file on disk rather than the widget's own state, because saving on every edit is the whole contract. |
+| `test_zoom.py` | That the point under the cursor stays under the cursor, on both canvases. |
+| `test_review_dialog.py` | That every card carries a decision, that a class change rewrites one box and not its neighbour, and that rejecting removes the mask as well as the label. |
+| `test_step6_paths.py` | That the YOLO checkpoint ends up in `data/models` and never at the project root. Skipped when the training dependencies are absent. |
+
+Qt runs on the `offscreen` platform, so there is nothing to look at while they
+run and nothing to install beyond `pytest`.
+
+Two of these exist because of bugs that reached the working tree. Review cards
+were once built with their Accept and Reject buttons stranded inside another
+method, past its `return`; nothing about the code looked wrong. And zooming
+followed the cursor only from whichever point Qt had last recorded, which no
+amount of reading the wheel handler would have revealed. Anything that can only
+be caught by running it belongs here.
+
 ### Conventions
 
 - **English only** — all code, comments, docstrings and log messages.
+- **Tests for anything only running can catch** — Qt wiring, geometry, and the
+  side effects a decision has on disk. Pure formatting or a print statement does
+  not need one.
 - **Docstrings required** — every module, class and function states what it does.
   Enforced by ruff's `D` ruleset (Google convention).
 - **Log prefixes** — `[*]` for start / progress, `[+]` for success, `[-]` for failure or

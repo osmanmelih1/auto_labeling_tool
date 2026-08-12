@@ -22,8 +22,17 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pytest>=8.0",
     "ruff>=0.16.1",
 ]
+
+# --- Pytest ---
+# pythonpath puts the project root on sys.path so the tests import src.* the
+# same way the application does, without needing an editable install.
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
 
 # --- GPU builds of PyTorch ---
 # PyPI ships a CPU-only torch on Windows, so the models run on the CPU no matter
