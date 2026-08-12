@@ -89,6 +89,20 @@ Classes** button, and are read by both the annotation canvas and the exporter:
 { "classes": ["pallet", "forklift"] }
 ```
 
+Each class can also carry the rule that decides what belongs in it:
+
+```json
+{ "classes": [
+    { "name": "palet_3lu", "description": "Three stacked rows of egg trays" },
+    { "name": "koli",      "description": "Cardboard boxes rather than trays" }
+] }
+```
+
+Write those rules. A class boundary that lives only in someone's head is the main
+reason datasets end up labelled inconsistently, and the person labelling next
+month may not be the person who decided. The rule is shown in the class editor
+and next to the class dropdown, where it is needed: while a box is being drawn.
+
 A class's position in the list is its YOLO class id, so existing labels would
 change meaning if entries were reordered or removed from the middle. The class
 manager therefore only appends, renames, and removes the last entry. Box colours
@@ -137,10 +151,27 @@ Every decision also writes a heatmap overlay to `data/debug/`, named
 
 These are calibrated on a small validation run and sit deliberately on the
 cautious side, so most true matches reach the review queue rather than being
-accepted outright. Tighten them once the score distribution over the full dataset
-is known. Thresholds live in `src/core/step4_propagation.py`
+accepted outright. Thresholds live in `src/core/step4_propagation.py`
 (`AUTO_ACCEPT_THRESHOLD`, `REVIEW_THRESHOLD`) and are imported by the GUI so both
 stay in sync.
+
+Do not adjust them by eye. Run the calibrator instead:
+
+```bash
+uv run python -m src.tools.calibrate_thresholds
+```
+
+It holds each seed out in turn and scores it against the prototypes built from
+the other seeds, which yields a real sample of the positive distribution without
+anyone annotating anything extra. It then scores every unlabelled image, prints
+both distributions as histograms, tabulates what each candidate threshold admits
+and costs, and suggests values. It changes nothing on disk.
+
+Two readings matter. Whether the known positives sit above the review threshold —
+if they do not, true matches never reach a human. And whether the unlabelled
+scores are bimodal — a valley between two humps is the natural place to cut,
+while one continuous mass means the features are not separating the object from
+the background and no threshold will fix that.
 
 Seed quality matters more than seed quantity: every label file in `data/labels/`
 becomes a prototype, so one wrong box poisons the pool for the whole run.

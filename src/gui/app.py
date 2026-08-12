@@ -50,7 +50,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 # The src.* imports below must follow the sys.path setup above, so E402 is
 # expected here. Running this file directly puts only src/gui on the path.
-from src.core.class_config import class_color, class_name, load_classes, save_classes  # noqa: E402
+from src.core.class_config import (  # noqa: E402
+    class_color,
+    class_description,
+    class_name,
+    load_class_records,
+    load_classes,
+    save_class_records,
+)
 from src.core.review_queue import (  # noqa: E402
     accept,
     clear_rejections,
@@ -968,10 +975,19 @@ class ClassManagerDialog(QDialog):
         """
         super().__init__(parent)
         self.setWindowTitle("Manage Classes")
-        self.resize(460, 420)
-        self.names = load_classes()
+        self.resize(620, 500)
+        self.records = load_class_records()
         self._build_ui()
         self._refresh()
+
+    @property
+    def names(self) -> list[str]:
+        """Class names in class-id order.
+
+        Returns:
+            list[str]: The name of each defined class.
+        """
+        return [r["name"] for r in self.records]
 
     def _build_ui(self):
         """Assemble the class list, the add field and the action buttons."""
@@ -1003,7 +1019,9 @@ class ClassManagerDialog(QDialog):
 
         hint = QLabel(
             "A class's position is its YOLO class id, so existing labels depend on the "
-            "order. Renaming is always safe; only the last class can be removed."
+            "order. Renaming is always safe; only the last class can be removed.\n"
+            "Write down the rule that decides what belongs in a class. A convention "
+            "nobody wrote down is the main reason datasets end up labelled inconsistently."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#999999; font-size:11px;")
@@ -1011,7 +1029,22 @@ class ClassManagerDialog(QDialog):
 
         self.list_widget = QListWidget()
         self.list_widget.itemChanged.connect(self._on_item_renamed)
+        self.list_widget.currentRowChanged.connect(self._on_selection_changed)
         layout.addWidget(self.list_widget, stretch=1)
+
+        desc_label = QLabel("Labelling rule for the selected class")
+        desc_label.setStyleSheet("color:#cccccc; font-size:12px; font-weight:bold;")
+        layout.addWidget(desc_label)
+
+        self.description_input = QTextEdit()
+        self.description_input.setPlaceholderText("e.g. Pallet carrying three stacked rows of egg trays")
+        self.description_input.setFixedHeight(64)
+        self.description_input.setStyleSheet("""
+            background-color:#2b2b2b; color:white; border:1px solid #444;
+            border-radius:4px; font-size:12px; padding:4px;
+        """)
+        self.description_input.textChanged.connect(self._on_description_changed)
+        layout.addWidget(self.description_input)
 
         add_row = QHBoxLayout()
         self.new_input = QLineEdit()
@@ -1037,19 +1070,45 @@ class ClassManagerDialog(QDialog):
         layout.addLayout(action_row)
 
     def _refresh(self):
-        """Rebuild the list widget from the in-memory class names."""
+        """Rebuild the list widget from the in-memory class records."""
+        selected = self.list_widget.currentRow()
+
         self.list_widget.blockSignals(True)
         self.list_widget.clear()
-        for class_id, name in enumerate(self.names):
-            item = QListWidgetItem(f"{class_id}: {name}")
+        for class_id, record in enumerate(self.records):
+            suffix = "" if record["description"].strip() else "   (no rule written)"
+            item = QListWidgetItem(f"{class_id}: {record['name']}{suffix}")
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
             item.setForeground(class_qcolor(class_id))
             item.setData(Qt.ItemDataRole.UserRole, class_id)
             self.list_widget.addItem(item)
         self.list_widget.blockSignals(False)
 
-        if not self.names:
+        if not self.records:
             self.list_widget.addItem("No classes defined yet.")
+            self.description_input.setEnabled(False)
+            return
+
+        self.description_input.setEnabled(True)
+        self.list_widget.setCurrentRow(min(max(selected, 0), len(self.records) - 1))
+
+    def _on_selection_changed(self, row: int):
+        """Show the selected class's rule in the description box.
+
+        Args:
+            row: Index of the newly selected class, or -1 when none is selected.
+        """
+        if not 0 <= row < len(self.records):
+            return
+        self.description_input.blockSignals(True)
+        self.description_input.setPlainText(self.records[row]["description"])
+        self.description_input.blockSignals(False)
+
+    def _on_description_changed(self):
+        """Store edits to the rule against the class currently selected."""
+        row = self.list_widget.currentRow()
+        if 0 <= row < len(self.records):
+            self.records[row]["description"] = self.description_input.toPlainText().strip()
 
     def _on_item_renamed(self, item: QListWidgetItem):
         """Apply an inline rename, keeping the id prefix intact.
@@ -1063,8 +1122,9 @@ class ClassManagerDialog(QDialog):
 
         text = item.text()
         new_name = text.split(":", 1)[1].strip() if ":" in text else text.strip()
+        new_name = new_name.replace("(no rule written)", "").strip()
         if new_name:
-            self.names[class_id] = new_name
+            self.records[class_id]["name"] = new_name
         self._refresh()
 
     def _add_class(self):
@@ -1075,33 +1135,39 @@ class ClassManagerDialog(QDialog):
         if name in self.names:
             QMessageBox.warning(self, "Duplicate", f"'{name}' is already defined.")
             return
-        self.names.append(name)
+        self.records.append({"name": name, "description": ""})
         self.new_input.clear()
         self._refresh()
+        self.list_widget.setCurrentRow(len(self.records) - 1)
+        self.description_input.setFocus()
 
     def _remove_last(self):
         """Remove the highest class id, after confirming with the user."""
-        if not self.names:
+        if not self.records:
             return
-        last_id = len(self.names) - 1
+        last_id = len(self.records) - 1
         confirm = QMessageBox.question(
             self,
             "Remove Last Class",
-            f"Remove class {last_id} ('{self.names[last_id]}')?\n\n"
+            f"Remove class {last_id} ('{self.records[last_id]['name']}')?\n\n"
             "Any existing label using this id will keep it and be exported under a "
             "placeholder name.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if confirm == QMessageBox.StandardButton.Yes:
-            self.names.pop()
+            self.records.pop()
             self._refresh()
 
     def _save(self):
         """Persist the class list and close the dialog."""
-        save_classes(self.names)
+        save_class_records(self.records)
+        undocumented = [r["name"] for r in self.records if not r["description"].strip()]
+
         parent = self.parent()
         if parent and hasattr(parent, "append_log"):
-            parent.append_log(f"[+] Saved {len(self.names)} class(es) to data/classes.json\n")
+            parent.append_log(f"[+] Saved {len(self.records)} class(es) to data/classes.json\n")
+            if undocumented:
+                parent.append_log(f"[*] No labelling rule written for: {', '.join(undocumented)}\n")
         self.accept()
 
 
@@ -1166,7 +1232,17 @@ class AutoLabelingApp(QMainWindow):
         sidebar_layout.addWidget(logo_label)
 
         self.class_combo = QComboBox()
+        self.class_combo.currentIndexChanged.connect(self.update_class_rule)
         sidebar_layout.addWidget(self.class_combo)
+
+        # The rule sits next to the dropdown rather than only in the class editor,
+        # because the moment it is needed is while a box is being drawn.
+        self.class_rule_label = QLabel("")
+        self.class_rule_label.setWordWrap(True)
+        self.class_rule_label.setStyleSheet(
+            "color:#9fb8d4; font-size:11px; font-weight:normal; margin:0px 12px 4px 12px;"
+        )
+        sidebar_layout.addWidget(self.class_rule_label)
 
         self.btn_classes = QPushButton("Manage Classes")
         self.btn_classes.setObjectName("classesBtn")
@@ -1394,6 +1470,17 @@ class AutoLabelingApp(QMainWindow):
             self.class_combo.addItem("No classes - use 'Manage Classes'")
 
         self.class_combo.setEnabled(bool(names))
+        self.update_class_rule()
+
+    def update_class_rule(self):
+        """Show the labelling rule for the class currently selected."""
+        class_id = self.selected_class_id()
+        if class_id is None:
+            self.class_rule_label.setText("")
+            return
+
+        rule = class_description(load_class_records(), class_id)
+        self.class_rule_label.setText(rule or "No labelling rule written for this class.")
 
     def open_class_manager(self):
         """Open the class editor and refresh anything that depends on the classes."""
