@@ -205,6 +205,59 @@ def test_emptying_the_queue_clears_the_pane(dialog):
     assert dlg.accept_next_btn.isEnabled() is False
 
 
+def test_pace_is_not_reported_before_it_means_anything(dialog):
+    """Two or three decisions cannot support a median; saying so is better than lying."""
+    dlg, _ = dialog
+    dlg.decision_times = [0.0, 3.0, 6.0]
+
+    assert dlg._pace_summary() is None
+
+
+def test_pace_reports_the_median_not_the_mean(dialog):
+    """One long interruption must not become the reported cost of a frame.
+
+    Five decisions four seconds apart with a five-minute break in the middle: the
+    mean is over a minute, the median is four seconds, and four seconds is what
+    reviewing actually costs.
+    """
+    dlg, _ = dialog
+    dlg.decision_times = [0.0, 4.0, 8.0, 308.0, 312.0, 316.0]
+
+    summary = dlg._pace_summary()
+
+    assert "Median 4.0 s per frame" in summary
+    assert "5 decision(s)" in summary
+
+
+def test_pace_projects_the_rest_of_the_queue(dialog):
+    """The projection is the number that decides whether the loop needs a model in it."""
+    dlg, _ = dialog
+    dlg.decision_times = [0.0, 6.0, 12.0, 18.0, 24.0]
+
+    # Three frames are still pending in the fixture.
+    assert "remaining 3" in dlg._pace_summary()
+
+
+def test_pace_says_nothing_about_a_queue_that_is_finished(dialog):
+    """There is nothing left to project once the queue is empty."""
+    dlg, _ = dialog
+    dlg.queue_data["pending"] = {}
+    dlg.decision_times = [0.0, 5.0, 10.0, 15.0, 20.0]
+
+    assert "remaining" not in dlg._pace_summary()
+
+
+def test_a_decision_is_timed(dialog):
+    """The measurement has to come from the decisions, not from a stopwatch."""
+    dlg, _ = dialog
+    dlg._show_preview(dlg.queue_data["pending"][dlg._order[0]])
+
+    dlg.accept_next_btn.click()
+    dlg.reject_next_btn.click()
+
+    assert len(dlg.decision_times) == 2
+
+
 def test_bulk_reject_removes_every_label(dialog, monkeypatch):
     """Bulk actions take the same path as single ones, including the masks.
 

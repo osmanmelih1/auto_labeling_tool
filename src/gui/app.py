@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QThread, pyqtSignal
@@ -569,6 +570,10 @@ class ReviewQueueDialog(QDialog):
 
         self.session_accepted = 0
         self.session_rejected = 0
+        # Wall-clock time of each decision. What the review loop costs per frame
+        # is the number that decides whether the pipeline needs a model in the
+        # loop or just a faster screen, and guessing at it has no value.
+        self.decision_times: list[float] = []
 
         self._build_ui()
         self._populate_cards()
@@ -955,10 +960,40 @@ class ReviewQueueDialog(QDialog):
         entry = accept(self.queue_data, image_key)
         if entry is None:
             return
+        self.decision_times.append(time.monotonic())
         self.session_accepted += 1
         self._save_queue()
         self._remove_card(image_key)
         self._log(f"[+] Accepted: {image_key} (score: {entry.get('score')})")
+
+    def _pace_summary(self) -> str | None:
+        """Describe how long a frame is taking and what the rest of the queue will cost.
+
+        The median gap between decisions is reported rather than the mean,
+        because a review session is not continuous: the reviewer answers the
+        door, reads a message, thinks hard about one difficult frame. A mean
+        over those gaps measures the interruptions. A median measures the work.
+
+        Returns:
+            str | None: A one-line summary, or None before enough decisions have
+            been made for a median to mean anything.
+        """
+        if len(self.decision_times) < 4:
+            return None
+
+        gaps = sorted(
+            later - earlier
+            for earlier, later in zip(self.decision_times, self.decision_times[1:], strict=False)
+        )
+        median = gaps[len(gaps) // 2]
+        remaining = len(self.queue_data.get("pending", {}))
+
+        summary = f"[*] Median {median:.1f} s per frame over {len(gaps)} decision(s)."
+        if remaining:
+            summary += (
+                f" At that pace the remaining {remaining} would take {median * remaining / 60:.0f} min."
+            )
+        return summary
 
     def _discard_outputs(self, entry: dict):
         """Delete everything propagation produced for a rejected frame.
@@ -995,6 +1030,7 @@ class ReviewQueueDialog(QDialog):
         if entry is None:
             return
         self._discard_outputs(entry)
+        self.decision_times.append(time.monotonic())
         self.session_rejected += 1
         self._save_queue()
         self._remove_card(image_key)
@@ -1117,8 +1153,10 @@ class ReviewQueueDialog(QDialog):
         if self.session_accepted or self.session_rejected:
             self._log(
                 f"[*] Review Queue session closed. "
-                f"Accepted: {self.session_accepted} | Rejected: {self.session_rejected}\n"
+                f"Accepted: {self.session_accepted} | Rejected: {self.session_rejected}"
             )
+            pace = self._pace_summary()
+            self._log(pace + "\n" if pace else "")
         super().closeEvent(event)
 
 

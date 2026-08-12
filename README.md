@@ -176,6 +176,14 @@ expensive part and the machine has already done it.
 `A` accepts and `R` rejects, and both move straight to the next frame, so a
 queue can be worked without returning to the list between images.
 
+Closing the screen reports the **median** seconds per frame and what the rest of
+the queue would cost at that pace. Median rather than mean, because a review
+session is not continuous — the reviewer answers the door, or thinks hard about
+one difficult frame — and a mean over those gaps measures the interruptions
+instead of the work. This number is the one that decides whether the pipeline
+needs a trained model in the loop or merely a faster screen, and it is not worth
+guessing at.
+
 Every decision also writes a heatmap overlay to `data/debug/`, named
 `tier_score_image.jpg`, so results can be checked by eye rather than trusted.
 
