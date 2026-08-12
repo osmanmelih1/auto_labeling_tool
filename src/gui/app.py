@@ -54,7 +54,6 @@ if str(PROJECT_ROOT) not in sys.path:
 # The src.* imports below must follow the sys.path setup above, so E402 is
 # expected here. Running this file directly puts only src/gui on the path.
 from src.core.class_config import (  # noqa: E402
-    class_color,
     class_description,
     class_name,
     load_class_records,
@@ -71,91 +70,14 @@ from src.core.review_queue import (  # noqa: E402
 from src.core.tiers import AUTO_ACCEPT_THRESHOLD, REVIEW_THRESHOLD  # noqa: E402
 from src.core.yolo_format import (  # noqa: E402
     read_yolo_boxes,
-    write_yolo_boxes,
     yolo_box_to_pixels,
 )
-
-
-def class_qcolor(class_id: int) -> QColor:
-    """Return the drawing colour for a class id.
-
-    Colours are generated from the id rather than read from a fixed table, so the
-    tool supports any number of classes in any project without a code change.
-
-    Args:
-        class_id: The class id to colour.
-
-    Returns:
-        QColor: A colour distinct from those of neighbouring class ids.
-    """
-    return QColor(*class_color(class_id))
-
-
-def draw_yolo_boxes_on_pixmap(pixmap: QPixmap, label_path: str | None) -> QPixmap:
-    """Draw every box in a YOLO label file onto a copy of a pixmap.
-
-    Args:
-        pixmap: Source image; it is copied rather than modified.
-        label_path: Label file to read, or None to draw nothing.
-
-    Returns:
-        QPixmap: A copy of the pixmap with the boxes and class tags drawn on it.
-    """
-    result = QPixmap(pixmap)
-
-    if not label_path or not os.path.exists(label_path):
-        return result
-
-    img_w, img_h = result.width(), result.height()
-    if img_w == 0 or img_h == 0:
-        return result
-
-    try:
-        with open(label_path) as f:
-            lines = [line.strip() for line in f if line.strip()]
-    except OSError:
-        return result
-
-    names = load_classes()
-
-    painter = QPainter(result)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-    for line in lines:
-        parts = line.split()
-        if len(parts) != 5:
-            continue
-        try:
-            class_id = int(parts[0])
-            xc, yc, w, h = (float(p) for p in parts[1:])
-        except ValueError:
-            continue
-
-        box_w = w * img_w
-        box_h = h * img_h
-        x = (xc * img_w) - box_w / 2
-        y = (yc * img_h) - box_h / 2
-
-        color = class_qcolor(class_id)
-        label = class_name(names, class_id)
-
-        pen = QPen(color, 3)
-        pen.setCosmetic(True)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(QRectF(x, y, box_w, box_h))
-
-        tag_width = max(70, 9 * len(label) + 16)
-        tag_rect = QRectF(x, max(0, y - 22), tag_width, 20)
-        painter.setBrush(color)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRect(tag_rect)
-
-        painter.setPen(QPen(QColor(0, 0, 0)))
-        painter.drawText(tag_rect, Qt.AlignmentFlag.AlignCenter, label)
-
-    painter.end()
-    return result
+from src.gui.label_editor import (  # noqa: E402
+    LabelEditorView,
+    class_qcolor,
+    padded_scene_rect,
+    zoom_at_cursor,
+)
 
 
 class WorkerThread(QThread):
@@ -230,8 +152,10 @@ class ZoomableGraphicsView(QGraphicsView):
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        # Zooming is anchored by hand in zoom_at_cursor, which needs Qt to leave
+        # the transform alone.
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
         self.setBackgroundBrush(QColor("#121212"))
 
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -245,6 +169,8 @@ class ZoomableGraphicsView(QGraphicsView):
         self.confirmed_items: list = []
         self.start_pos = None
         self.mouse_pos = None
+        self.image_size = (0, 0)
+        self._fit_scale = 1.0
 
         self._is_panning = False
         self._pan_start = QPoint()
@@ -263,8 +189,15 @@ class ZoomableGraphicsView(QGraphicsView):
         pixmap = QPixmap(image_path)
         self.image_item = self.scene.addPixmap(pixmap)
 
-        self.setSceneRect(0, 0, pixmap.width(), pixmap.height())
-        self.fitInView(self.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self.image_size = (pixmap.width(), pixmap.height())
+        # Padded so the view always has somewhere to scroll to; without that, Qt
+        # centres a scene that fits the viewport and zooming cannot follow the
+        # cursor. The image itself, not the padding, is what gets fitted.
+        self.setSceneRect(padded_scene_rect(*self.image_size))
+        self.resetTransform()
+        self.fitInView(QRectF(0, 0, *self.image_size), Qt.AspectRatioMode.KeepAspectRatio)
+        self._fit_scale = self.transform().m11() or 1.0
+        self.centerOn(pixmap.width() / 2, pixmap.height() / 2)
 
     def add_confirmed_box(self, rect: QRect, class_id: int) -> None:
         """Draw a box that is already part of this image's label set.
@@ -318,11 +251,7 @@ class ZoomableGraphicsView(QGraphicsView):
         if not self.image_item:
             return
 
-        zoom_in_factor = 1.15
-        zoom_out_factor = 1.0 / zoom_in_factor
-        zoom_factor = zoom_in_factor if event.angleDelta().y() > 0 else zoom_out_factor
-
-        self.scale(zoom_factor, zoom_factor)
+        zoom_at_cursor(self, event, self._fit_scale)
 
     def mousePressEvent(self, event):
         """Start panning on right/middle click, or start a new box on left click.
@@ -374,8 +303,10 @@ class ZoomableGraphicsView(QGraphicsView):
             return
 
         if self.current_rect_item and self.start_pos and (event.buttons() & Qt.MouseButton.LeftButton):
-            x = max(0, min(self.mouse_pos.x(), self.sceneRect().width()))
-            y = max(0, min(self.mouse_pos.y(), self.sceneRect().height()))
+            # Clamped to the image, not to the scene: the scene is padded so the
+            # view can scroll, and a seed box must not stray into that padding.
+            x = max(0, min(self.mouse_pos.x(), self.image_size[0]))
+            y = max(0, min(self.mouse_pos.y(), self.image_size[1]))
 
             rect = QRectF(self.start_pos, QPointF(x, y)).normalized()
             self.current_rect_item.setRect(rect)
@@ -451,7 +382,6 @@ class ReviewCardWidget(QFrame):
     selected_signal = pyqtSignal(dict)
     accepted_signal = pyqtSignal(str)
     rejected_signal = pyqtSignal(str)
-    class_changed_signal = pyqtSignal(str, int)
 
     THUMB_SIZE = 88
 
@@ -530,7 +460,12 @@ class ReviewCardWidget(QFrame):
         seed_label.setStyleSheet("color:#999999; font-size:11px; border:none;")
         info_layout.addWidget(seed_label)
 
-        info_layout.addLayout(self._build_class_row())
+        self.summary_label = QLabel()
+        self.summary_label.setStyleSheet("color:#bbbbbb; font-size:11px; border:none;")
+        self.summary_label.setWordWrap(True)
+        info_layout.addWidget(self.summary_label)
+        self.refresh_summary()
+
         info_layout.addStretch()
         layout.addLayout(info_layout, stretch=1)
 
@@ -563,54 +498,27 @@ class ReviewCardWidget(QFrame):
         btn_layout.addWidget(reject_btn)
         layout.addLayout(btn_layout)
 
-    def _build_class_row(self) -> QHBoxLayout:
-        """Build the control that corrects the proposed class.
+    def refresh_summary(self) -> None:
+        """Restate what the label file currently holds, per class.
 
-        Similarity matching is good at telling materials apart and poor at telling
-        apart classes that differ only by how many of something is stacked. When
-        it puts the box in the right place but the wrong class, correcting the
-        class must not require redrawing the box: the hard part is already done.
-
-        Returns:
-            QHBoxLayout: The row holding the label and its control.
+        The card is a list entry, not an editor: it reports what is on disk so
+        the queue can be scanned, while the boxes themselves are corrected in the
+        editor pane, which is the only place big enough to judge them.
         """
-        row = QHBoxLayout()
-        row.setSpacing(6)
-
-        caption = QLabel("Class:")
-        caption.setStyleSheet("color:#999999; font-size:11px; border:none;")
-        row.addWidget(caption)
-
         names = load_classes()
-        classes = sorted({cid for cid, *_ in read_yolo_boxes(self.entry.get("label_path", ""))})
+        counts: dict[int, int] = {}
+        for class_id, *_ in read_yolo_boxes(self.entry.get("label_path", "")):
+            counts[class_id] = counts.get(class_id, 0) + 1
 
-        if len(classes) > 1:
-            # One dropdown cannot express per-box classes. Saying so is better
-            # than quietly rewriting every box to one class.
-            mixed = QLabel(f"mixed ({len(classes)} classes) - edit on the canvas")
-            mixed.setStyleSheet("color:#e0a030; font-size:11px; border:none;")
-            row.addWidget(mixed)
-            row.addStretch()
-            return row
+        if not counts:
+            self.summary_label.setText("no boxes left — reject this frame")
+            self.summary_label.setStyleSheet("color:#e0a030; font-size:11px; border:none;")
+            return
 
-        current = classes[0] if classes else int(self.entry.get("class_id", 0))
-
-        self.class_combo = QComboBox()
-        self.class_combo.addItems(names or ["(no classes defined)"])
-        self.class_combo.setCurrentIndex(min(current, max(len(names) - 1, 0)))
-        self.class_combo.setEnabled(bool(names))
-        self.class_combo.setStyleSheet("""
-            QComboBox {
-                background-color:#3b3b3b; color:white; border:1px solid #555;
-                padding:2px 6px; border-radius:3px; font-size:11px;
-            }
-        """)
-        self.class_combo.currentIndexChanged.connect(
-            lambda index: self.class_changed_signal.emit(self.image_key, index)
+        self.summary_label.setText(
+            "  ".join(f"{class_name(names, cid)} ×{count}" for cid, count in sorted(counts.items()))
         )
-        row.addWidget(self.class_combo)
-        row.addStretch()
-        return row
+        self.summary_label.setStyleSheet("color:#bbbbbb; font-size:11px; border:none;")
 
     @staticmethod
     def _score_color(score: float) -> str:
@@ -657,6 +565,7 @@ class ReviewQueueDialog(QDialog):
         self.review_queue_path = Path(review_queue_path)
         self.queue_data = self._load_queue()
         self.cards = {}
+        self._order: list[str] = []
         self._selected_key = None
 
         self.session_accepted = 0
@@ -776,25 +685,90 @@ class ReviewQueueDialog(QDialog):
         right_panel = QVBoxLayout()
         right_panel.setSpacing(10)
 
-        preview_title = QLabel("Preview (BBox automatically loaded from propagated source)")
-        preview_title.setStyleSheet("font-size:15px; font-weight:bold;")
-        right_panel.addWidget(preview_title)
+        editor_title = QLabel("Editor — drag to move or resize, drag on empty space to add")
+        editor_title.setStyleSheet("font-size:15px; font-weight:bold;")
+        right_panel.addWidget(editor_title)
 
-        self.preview_label = QLabel("Select an item from the left list to preview.")
-        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setStyleSheet("""
-            background-color:#121212; border-radius:8px; color:#777; font-size:13px;
+        tool_row = QHBoxLayout()
+        tool_row.setSpacing(8)
+
+        class_caption = QLabel("Selected box:")
+        class_caption.setStyleSheet("color:#999999; font-size:12px;")
+        tool_row.addWidget(class_caption)
+
+        self.editor_class_combo = QComboBox()
+        self.editor_class_combo.addItems(load_classes() or ["(no classes defined)"])
+        self.editor_class_combo.setEnabled(False)
+        self.editor_class_combo.currentIndexChanged.connect(self._on_editor_class_changed)
+        tool_row.addWidget(self.editor_class_combo)
+
+        self.delete_box_btn = QPushButton("Delete Box")
+        self.delete_box_btn.setEnabled(False)
+        self.delete_box_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.delete_box_btn.setStyleSheet("""
+            QPushButton {
+                background-color:#3b3b3b; color:#dddddd; border:1px solid #555;
+                padding:5px 12px; border-radius:5px; font-size:12px;
+            }
+            QPushButton:hover { background-color:#5a2b2b; }
+            QPushButton:disabled { color:#666666; border-color:#3a3a3a; }
         """)
-        self.preview_label.setMinimumSize(560, 480)
-        right_panel.addWidget(self.preview_label, stretch=1)
+        self.delete_box_btn.clicked.connect(lambda: self.editor.delete_selected())
+        tool_row.addWidget(self.delete_box_btn)
+        tool_row.addStretch()
 
-        self.preview_info_label = QLabel("")
+        hint = QLabel("keys: 1-9 class · Del remove · A accept · R reject")
+        hint.setStyleSheet("color:#777777; font-size:11px;")
+        tool_row.addWidget(hint)
+        right_panel.addLayout(tool_row)
+
+        self.editor = LabelEditorView()
+        self.editor.setMinimumSize(560, 440)
+        self.editor.selection_changed.connect(self._on_editor_selection)
+        self.editor.boxes_changed.connect(self._on_boxes_changed)
+        self.editor.status_message.connect(self._log)
+        right_panel.addWidget(self.editor, stretch=1)
+
+        self.preview_info_label = QLabel("Select an item from the left list to edit it.")
         self.preview_info_label.setStyleSheet("""
             color:#cccccc; font-size:13px; background-color:#252526;
             border-radius:6px; padding:10px;
         """)
         self.preview_info_label.setWordWrap(True)
         right_panel.addWidget(self.preview_info_label)
+
+        decision_row = QHBoxLayout()
+        decision_row.setSpacing(8)
+
+        self.accept_next_btn = QPushButton("✓ Accept && Next")
+        self.accept_next_btn.setEnabled(False)
+        self.accept_next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.accept_next_btn.setStyleSheet("""
+            QPushButton {
+                background-color:#198754; color:white; border:none;
+                padding:10px; border-radius:5px; font-weight:bold;
+            }
+            QPushButton:hover { background-color:#157347; }
+            QPushButton:disabled { background-color:#2f4a3c; color:#8a8a8a; }
+        """)
+        self.accept_next_btn.clicked.connect(self._accept_selected)
+
+        self.reject_next_btn = QPushButton("✗ Reject && Next")
+        self.reject_next_btn.setEnabled(False)
+        self.reject_next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.reject_next_btn.setStyleSheet("""
+            QPushButton {
+                background-color:#dc3545; color:white; border:none;
+                padding:10px; border-radius:5px; font-weight:bold;
+            }
+            QPushButton:hover { background-color:#bb2d3b; }
+            QPushButton:disabled { background-color:#4a2f33; color:#8a8a8a; }
+        """)
+        self.reject_next_btn.clicked.connect(self._reject_selected)
+
+        decision_row.addWidget(self.accept_next_btn)
+        decision_row.addWidget(self.reject_next_btn)
+        right_panel.addLayout(decision_row)
 
         main_layout.addLayout(right_panel, stretch=3)
 
@@ -823,14 +797,14 @@ class ReviewQueueDialog(QDialog):
 
         self.count_label.setText(f"{len(entries)} images pending review")
 
+        self._order = [entry["image_key"] for entry in entries]
+
         if not entries:
             empty_label = QLabel("🎉 No pending images in queue. All clear!")
             empty_label.setStyleSheet("color:#4caf50; font-size:14px; padding:24px;")
             empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.scroll_layout.insertWidget(0, empty_label)
-            self.preview_label.clear()
-            self.preview_label.setText("Select an item from the left list to preview.")
-            self.preview_info_label.setText("")
+            self._clear_editor()
             return
 
         for entry in entries:
@@ -838,12 +812,21 @@ class ReviewQueueDialog(QDialog):
             card.selected_signal.connect(self._show_preview)
             card.accepted_signal.connect(self._accept_one)
             card.rejected_signal.connect(self._reject_one)
-            card.class_changed_signal.connect(self._change_class)
             self.scroll_layout.insertWidget(self.scroll_layout.count() - 1, card)
             self.cards[entry["image_key"]] = card
 
+    def _clear_editor(self):
+        """Empty the editor pane and disable the controls that act on it."""
+        self.editor.clear_image()
+        self.editor_class_combo.setEnabled(False)
+        self.delete_box_btn.setEnabled(False)
+        self.accept_next_btn.setEnabled(False)
+        self.reject_next_btn.setEnabled(False)
+        self.preview_info_label.setText("Select an item from the left list to edit it.")
+        self._selected_key = None
+
     def _show_preview(self, entry: dict):
-        """Show the selected image with its propagated box drawn over it.
+        """Open the selected image in the editor with its propagated boxes.
 
         Args:
             entry: The queue record backing the clicked card.
@@ -853,64 +836,116 @@ class ReviewQueueDialog(QDialog):
         label_path = entry.get("label_path")
 
         if not img_path or not os.path.exists(img_path):
-            self.preview_label.clear()
-            self.preview_label.setText("⚠ Image file not found.\n" + str(img_path))
-            self.preview_info_label.setText("")
+            self._clear_editor()
+            self.preview_info_label.setText("⚠ Image file not found: " + str(img_path))
             return
 
-        pixmap = QPixmap(img_path)
-        pixmap = draw_yolo_boxes_on_pixmap(pixmap, label_path)
-        scaled = pixmap.scaled(
-            self.preview_label.width(),
-            self.preview_label.height(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.preview_label.setPixmap(scaled)
+        # Per-box scores let the editor draw the boxes propagation was unsure
+        # about differently from the ones it would have accepted outright, which
+        # is where a reviewer's attention belongs.
+        scores = [float(s) for s in entry.get("box_scores", [])]
+        self.editor.default_class_id = int(entry.get("class_id", 0))
+        self.editor.load(img_path, str(label_path), scores)
+        self.editor.setFocus()
+
+        self.accept_next_btn.setEnabled(True)
+        self.reject_next_btn.setEnabled(True)
 
         score = float(entry.get("score", 0.0))
         self.preview_info_label.setText(
             f"<b>{entry.get('image_key')}</b><br>"
-            f"Cosine Similarity: <b style='color:{ReviewCardWidget._score_color(score)}'>{score:.4f}</b> "
+            f"Best similarity: <b style='color:{ReviewCardWidget._score_color(score)}'>{score:.4f}</b> "
             f"&nbsp;|&nbsp; Thresholds: Review ≥ {REVIEW_THRESHOLD} · Auto ≥ {AUTO_ACCEPT_THRESHOLD}<br>"
-            f"Source Seed: {entry.get('seed_source', '-')}<br>"
+            f"Source Seed: {entry.get('seed_source', '-')} &nbsp;|&nbsp; "
             f"Flagged At: {entry.get('flagged_at', '-')}"
         )
 
-    def _change_class(self, image_key: str, class_id: int):
-        """Rewrite a queued label under a different class.
-
-        The boxes are left exactly as they are; only the class id changes. The
-        entry stays in the queue so the correction still has to be accepted,
-        which keeps a corrected label from being treated as reviewed by accident.
+    def _on_editor_selection(self, index: int):
+        """Point the class dropdown and the delete button at the selected box.
 
         Args:
-            image_key: Key of the entry to correct.
-            class_id: Class id to write instead.
+            index: Index of the selected box, or -1 when none is selected.
         """
-        entry = self.queue_data.get("pending", {}).get(image_key)
-        if entry is None:
+        selected = index >= 0
+        self.delete_box_btn.setEnabled(selected)
+        self.editor_class_combo.setEnabled(selected)
+
+        if not selected:
             return
 
-        label_path = entry.get("label_path", "")
-        boxes = read_yolo_boxes(label_path)
-        if not boxes:
-            self._log(f"[!] {image_key}: no boxes to reclassify.")
+        class_id = self.editor.selected_class_id() or 0
+        self.editor_class_combo.blockSignals(True)
+        self.editor_class_combo.setCurrentIndex(min(class_id, self.editor_class_combo.count() - 1))
+        self.editor_class_combo.blockSignals(False)
+
+    def _on_editor_class_changed(self, class_id: int):
+        """Apply the dropdown's class to the box selected in the editor.
+
+        Args:
+            class_id: Class id chosen in the dropdown.
+        """
+        self.editor.set_selected_class(class_id)
+
+    def _on_boxes_changed(self):
+        """Keep the card list in step with an edit made in the editor.
+
+        The editor writes the label file itself, so nothing needs saving here.
+        What does need updating is the card, which reports what the file holds.
+        """
+        card = self.cards.get(self._selected_key)
+        if card:
+            card.refresh_summary()
+
+    def _accept_selected(self):
+        """Accept the entry open in the editor and move to the next one."""
+        if self._selected_key:
+            self._accept_one(self._selected_key)
+
+    def _reject_selected(self):
+        """Reject the entry open in the editor and move to the next one."""
+        if self._selected_key:
+            self._reject_one(self._selected_key)
+
+    def _select_after(self, image_key: str):
+        """Open whichever entry followed the one just decided.
+
+        Reviewing is a queue, not a browse: after a decision the next frame
+        should already be on screen, otherwise every image costs an extra click.
+
+        Args:
+            image_key: Key of the entry that was just accepted or rejected.
+        """
+        pending = self.queue_data.get("pending", {})
+        if not pending:
+            self._clear_editor()
             return
 
-        write_yolo_boxes(label_path, [(class_id, *box) for _, *box in boxes])
-        entry["class_id"] = class_id
-        entry["class_corrected"] = True
-        self._save_queue()
+        try:
+            position = self._order.index(image_key)
+        except ValueError:
+            position = -1
 
-        names = load_classes()
-        self._log(
-            f"[*] {image_key}: {len(boxes)} box(es) reclassified as "
-            f"{class_name(names, class_id)}. Still awaiting accept."
-        )
+        for key in self._order[position + 1 :] + self._order[: max(position, 0)]:
+            entry = pending.get(key)
+            if entry is not None:
+                self._show_preview(entry)
+                return
 
-        if self._selected_key == image_key:
-            self._show_preview(entry)
+        self._clear_editor()
+
+    def keyPressEvent(self, event):
+        """Bind accept and reject to single keys so a queue can be worked quickly.
+
+        Args:
+            event: Qt key event.
+        """
+        if self._selected_key and event.key() == Qt.Key.Key_A:
+            self._accept_selected()
+            return
+        if self._selected_key and event.key() == Qt.Key.Key_R:
+            self._reject_selected()
+            return
+        super().keyPressEvent(event)
 
     def _accept_one(self, image_key: str):
         """Accept a queued label, leaving the file on disk and clearing the entry.
@@ -964,10 +999,7 @@ class ReviewQueueDialog(QDialog):
         self.count_label.setText(f"{remaining} images pending review")
 
         if self._selected_key == image_key:
-            self.preview_label.clear()
-            self.preview_label.setText("Select an item from the left list to preview.")
-            self.preview_info_label.setText("")
-            self._selected_key = None
+            self._select_after(image_key)
 
         if remaining == 0:
             self._populate_cards()

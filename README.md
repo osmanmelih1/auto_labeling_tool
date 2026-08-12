@@ -61,6 +61,8 @@ Three shared utilities sit outside the numbered steps:
 - `src/core/class_config.py` reads and writes the project's class definitions.
 - `src/core/review_queue.py` defines the structure of `data/review_queue.json`,
   which both the propagation step and the GUI read and write.
+- `src/gui/label_editor.py` is the review canvas: it edits the boxes of one image
+  in place and writes them back as a plain YOLO label file.
 
 ### Rejections are remembered
 
@@ -142,19 +144,37 @@ The winning prototype is chosen per heatmap cell, not once per image, so a frame
 holding two different kinds of object is labelled with both classes rather than
 with whichever one matched strongest somewhere.
 
-### Correcting a class in review
+### Correcting labels in review
 
-Similarity matching tells materials apart well and tells apart classes that
-differ only by *how many* of something is stacked poorly: the patches of a
-two-row stack and a three-row stack are identical, only the extent differs. Box
-geometry does not rescue this either — measured on this dataset, the same class
-varies by 35% in aspect ratio between the left and right of the frame, which is
-an order of magnitude more than the difference between the classes.
+Accept-or-reject is the wrong pair of choices to offer, because propagation is
+usually *almost* right. A box ten pixels short, one spurious box on the floor,
+or the right box under the wrong class all forced a rejection — and rejecting
+deletes the label, throwing away the accurate work SAM did on the rest of the
+frame.
 
-So the review screen lets the class be corrected directly. The box stays as it
-is, only the class id is rewritten, and the entry stays queued so the correction
-still has to be accepted. The hard part is placing the box, and the machine has
-already done it.
+The review screen therefore edits, not just judges. The right-hand pane is a
+real canvas: drag a box to move it, drag its handles to resize, drag on empty
+background to add one, `Delete` to remove one, and `1`–`9` to set the selected
+box's class. Every edit rewrites the label file immediately, so there is no
+unsaved state to lose. Rejection is left for the case it was meant for: the
+frame holds nothing worth labelling.
+
+Boxes carry the confidence they were propagated with. Those that would have been
+auto-accepted are drawn solid; those below the threshold are dashed and prefixed
+with `?`. A reviewer's attention goes to the dashed ones, which are the only
+part of the frame the machine was unsure about.
+
+Class correction matters more than it sounds. Similarity matching tells
+materials apart well and tells apart classes that differ only by *how many* of
+something is stacked poorly: the patches of a two-row stack and a three-row
+stack are identical, only the extent differs. Box geometry does not rescue this
+either — measured on this dataset, the same class varies by 35% in aspect ratio
+between the left and right of the frame, an order of magnitude more than the
+difference between the classes. So the number keys exist: placing the box is the
+expensive part and the machine has already done it.
+
+`A` accepts and `R` rejects, and both move straight to the next frame, so a
+queue can be worked without returning to the list between images.
 
 Every decision also writes a heatmap overlay to `data/debug/`, named
 `tier_score_image.jpg`, so results can be checked by eye rather than trusted.
@@ -270,15 +290,26 @@ uv run python -m src.core.step4_propagation
    - **3b. Manual Seeding** — drag a bounding box on the canvas, press `Enter` to
      confirm, then run the step.
 5. **4. Propagation** — spread the seed labels across the unlabelled images.
-6. **5. Review Queue** — accept or reject the borderline results.
+6. **5. Review Queue** — correct the borderline results, then accept or reject.
 7. **6. Export Dataset** — build `datasets/` and `data.yaml`, ready for training.
 8. **7. Train YOLO** — fine-tune a detector and report validation metrics.
 
 Define your classes with **Manage Classes** before drawing the first box; the
 canvas and the exporter both read them from `data/classes.json`.
 
-**Canvas controls:** scroll to zoom, right-click drag to pan, left-click drag to draw a
-box, `Enter` to confirm, `Esc` to cancel.
+**Seeding canvas:** scroll to zoom, right-click drag to pan, left-click drag to draw a
+box, `Enter` to confirm, `Esc` to cancel, `Backspace` to delete the last box.
+
+**Review editor:** scroll to zoom, right-click drag to pan, click a box to select it,
+drag it to move, drag a handle to resize, drag on empty background to add a box,
+`1`–`9` to set the selected box's class, `Delete` to remove it, `A` to accept the
+frame and `R` to reject it — both move on to the next.
+
+Both canvases zoom about the cursor, and zooming out stops once the whole image
+fits. The scene is deliberately padded around the image: a `QGraphicsView` that
+has nothing to scroll centres itself and ignores any attempt to shift it, which
+is what makes an unpadded view zoom about its middle no matter where the pointer
+is. Boxes are clamped to the image, so the padding is only somewhere to scroll.
 
 ---
 

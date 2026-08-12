@@ -587,6 +587,10 @@ class PatchPropagator:
                         "score": round(score, 4),
                         "weakest_score": round(weakest, 4),
                         "object_count": len(detections),
+                        # One score per label line, in the same order, so the
+                        # review editor can show which individual boxes were
+                        # uncertain rather than only the frame's best score.
+                        "box_scores": [round(d.score, 4) for d in detections],
                         "seed_source": best.seed_key,
                         "class_id": best.class_id,
                         "label_path": os.path.abspath(label_path),
