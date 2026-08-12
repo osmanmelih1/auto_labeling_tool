@@ -6,9 +6,12 @@ borderline labels Step 4 produced.
 
 The GUI never imports a step's internals. It launches each one as a separate
 process and communicates through the same files the steps use between
-themselves, so the decoupled architecture holds across the UI boundary too. The
-only exception is the confidence thresholds, which are imported from Step 4 so
-the numbers shown to the user cannot drift from the ones actually applied.
+themselves, so the decoupled architecture holds across the UI boundary too.
+
+What it does import are the shared utilities: the class definitions, the review
+queue format, the label format and the confidence thresholds. All four are
+deliberately free of heavy dependencies, so this process never loads torch. It
+runs no model of its own.
 """
 
 import contextlib
@@ -58,14 +61,18 @@ from src.core.class_config import (  # noqa: E402
     load_classes,
     save_class_records,
 )
-from src.core.tiers import AUTO_ACCEPT_THRESHOLD, REVIEW_THRESHOLD  # noqa: E402
-from src.core.yolo_format import read_yolo_boxes, yolo_box_to_pixels  # noqa: E402
 from src.core.review_queue import (  # noqa: E402
     accept,
     clear_rejections,
     load_queue,
     reject,
     save_queue,
+)
+from src.core.tiers import AUTO_ACCEPT_THRESHOLD, REVIEW_THRESHOLD  # noqa: E402
+from src.core.yolo_format import (  # noqa: E402
+    read_yolo_boxes,
+    write_yolo_boxes,
+    yolo_box_to_pixels,
 )
 
 
@@ -444,6 +451,7 @@ class ReviewCardWidget(QFrame):
     selected_signal = pyqtSignal(dict)
     accepted_signal = pyqtSignal(str)
     rejected_signal = pyqtSignal(str)
+    class_changed_signal = pyqtSignal(str, int)
 
     THUMB_SIZE = 88
 
@@ -522,6 +530,7 @@ class ReviewCardWidget(QFrame):
         seed_label.setStyleSheet("color:#999999; font-size:11px; border:none;")
         info_layout.addWidget(seed_label)
 
+        info_layout.addLayout(self._build_class_row())
         info_layout.addStretch()
         layout.addLayout(info_layout, stretch=1)
 
@@ -553,6 +562,55 @@ class ReviewCardWidget(QFrame):
         btn_layout.addWidget(accept_btn)
         btn_layout.addWidget(reject_btn)
         layout.addLayout(btn_layout)
+
+    def _build_class_row(self) -> QHBoxLayout:
+        """Build the control that corrects the proposed class.
+
+        Similarity matching is good at telling materials apart and poor at telling
+        apart classes that differ only by how many of something is stacked. When
+        it puts the box in the right place but the wrong class, correcting the
+        class must not require redrawing the box: the hard part is already done.
+
+        Returns:
+            QHBoxLayout: The row holding the label and its control.
+        """
+        row = QHBoxLayout()
+        row.setSpacing(6)
+
+        caption = QLabel("Class:")
+        caption.setStyleSheet("color:#999999; font-size:11px; border:none;")
+        row.addWidget(caption)
+
+        names = load_classes()
+        classes = sorted({cid for cid, *_ in read_yolo_boxes(self.entry.get("label_path", ""))})
+
+        if len(classes) > 1:
+            # One dropdown cannot express per-box classes. Saying so is better
+            # than quietly rewriting every box to one class.
+            mixed = QLabel(f"mixed ({len(classes)} classes) - edit on the canvas")
+            mixed.setStyleSheet("color:#e0a030; font-size:11px; border:none;")
+            row.addWidget(mixed)
+            row.addStretch()
+            return row
+
+        current = classes[0] if classes else int(self.entry.get("class_id", 0))
+
+        self.class_combo = QComboBox()
+        self.class_combo.addItems(names or ["(no classes defined)"])
+        self.class_combo.setCurrentIndex(min(current, max(len(names) - 1, 0)))
+        self.class_combo.setEnabled(bool(names))
+        self.class_combo.setStyleSheet("""
+            QComboBox {
+                background-color:#3b3b3b; color:white; border:1px solid #555;
+                padding:2px 6px; border-radius:3px; font-size:11px;
+            }
+        """)
+        self.class_combo.currentIndexChanged.connect(
+            lambda index: self.class_changed_signal.emit(self.image_key, index)
+        )
+        row.addWidget(self.class_combo)
+        row.addStretch()
+        return row
 
     @staticmethod
     def _score_color(score: float) -> str:
@@ -780,6 +838,7 @@ class ReviewQueueDialog(QDialog):
             card.selected_signal.connect(self._show_preview)
             card.accepted_signal.connect(self._accept_one)
             card.rejected_signal.connect(self._reject_one)
+            card.class_changed_signal.connect(self._change_class)
             self.scroll_layout.insertWidget(self.scroll_layout.count() - 1, card)
             self.cards[entry["image_key"]] = card
 
@@ -817,6 +876,41 @@ class ReviewQueueDialog(QDialog):
             f"Source Seed: {entry.get('seed_source', '-')}<br>"
             f"Flagged At: {entry.get('flagged_at', '-')}"
         )
+
+    def _change_class(self, image_key: str, class_id: int):
+        """Rewrite a queued label under a different class.
+
+        The boxes are left exactly as they are; only the class id changes. The
+        entry stays in the queue so the correction still has to be accepted,
+        which keeps a corrected label from being treated as reviewed by accident.
+
+        Args:
+            image_key: Key of the entry to correct.
+            class_id: Class id to write instead.
+        """
+        entry = self.queue_data.get("pending", {}).get(image_key)
+        if entry is None:
+            return
+
+        label_path = entry.get("label_path", "")
+        boxes = read_yolo_boxes(label_path)
+        if not boxes:
+            self._log(f"[!] {image_key}: no boxes to reclassify.")
+            return
+
+        write_yolo_boxes(label_path, [(class_id, *box) for _, *box in boxes])
+        entry["class_id"] = class_id
+        entry["class_corrected"] = True
+        self._save_queue()
+
+        names = load_classes()
+        self._log(
+            f"[*] {image_key}: {len(boxes)} box(es) reclassified as "
+            f"{class_name(names, class_id)}. Still awaiting accept."
+        )
+
+        if self._selected_key == image_key:
+            self._show_preview(entry)
 
     def _accept_one(self, image_key: str):
         """Accept a queued label, leaving the file on disk and clearing the entry.

@@ -46,11 +46,17 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 
+from src.core.class_config import class_name, load_classes
 from src.core.review_queue import REVIEW_QUEUE_PATH, add_pending, is_suppressed, load_queue, save_queue
 from src.core.sam_engine import SamEngine, mask_to_yolo_box
 from src.core.tiers import AUTO_ACCEPT_THRESHOLD, DETECTION_LEVEL, REVIEW_THRESHOLD
-from src.core.yolo_format import box_area, iou, read_yolo_boxes, yolo_box_to_pixels
-
+from src.core.yolo_format import (
+    box_area,
+    iou,
+    read_yolo_boxes,
+    write_yolo_boxes,
+    yolo_box_to_pixels,
+)
 
 # A region qualifies on its similarity score, not on its size. A distant object
 # can occupy a single patch cell, and discarding one-cell regions silently drops
@@ -127,12 +133,14 @@ class RegionCandidate:
         box: Coarse normalised box covering the region.
         peak: ``(row, col)`` of the strongest cell, used as a SAM point prompt.
         cell_count: How many patch cells the region spans.
+        proto_index: Prototype that won the peak cell, deciding the class.
     """
 
     score: float
     box: tuple[float, float, float, float]
     peak: tuple[int, int]
     cell_count: int
+    proto_index: int
 
 
 @dataclass
@@ -144,12 +152,16 @@ class Detection:
         mask: SAM mask when one was kept, otherwise None.
         score: Patch similarity that produced this detection.
         note: Short description of how the box was decided.
+        class_id: Class of the prototype that matched this object.
+        seed_key: Seed image the matching prototype came from.
     """
 
     box: tuple[float, float, float, float]
     mask: np.ndarray | None
     score: float
     note: str
+    class_id: int
+    seed_key: str
 
 
 @dataclass
@@ -269,10 +281,13 @@ class PatchPropagator:
 
         return prototypes
 
-    def match(
-        self, grid: np.ndarray, prototypes: list[SeedPrototype]
-    ) -> tuple[float, SeedPrototype, np.ndarray]:
-        """Score a target grid against every prototype and keep the best.
+    def match(self, grid: np.ndarray, prototypes: list[SeedPrototype]) -> tuple[np.ndarray, np.ndarray]:
+        """Score a target grid against every prototype, cell by cell.
+
+        The winner is decided per cell rather than once for the whole frame. A
+        frame can hold objects of different classes, and picking a single best
+        prototype for the image would then label every object with whichever
+        class happened to match strongest somewhere.
 
         Taking the maximum over prototypes rather than averaging them keeps the
         method robust to appearance variation: one seed shot in different light
@@ -283,22 +298,14 @@ class PatchPropagator:
             prototypes: Candidate prototypes to compare against.
 
         Returns:
-            tuple: Best score, the prototype that produced it, and its heatmap.
+            tuple: The per-cell best similarity, and the index of the prototype
+            that achieved it, both shaped ``(rows, cols)``.
         """
         normalised = unit(grid)
-        best_score = -1.0
-        best_proto = prototypes[0]
-        best_heatmap = np.zeros(grid.shape[:2], dtype=np.float32)
+        stack = np.stack([normalised @ proto.vector for proto in prototypes])
+        return stack.max(axis=0), stack.argmax(axis=0)
 
-        for proto in prototypes:
-            heatmap = normalised @ proto.vector
-            score = float(heatmap.max())
-            if score > best_score:
-                best_score, best_proto, best_heatmap = score, proto, heatmap
-
-        return best_score, best_proto, best_heatmap
-
-    def find_object_regions(self, heatmap: np.ndarray) -> list[RegionCandidate]:
+    def find_object_regions(self, heatmap: np.ndarray, winners: np.ndarray) -> list[RegionCandidate]:
         """Find every distinct object candidate in a heatmap, not just the strongest.
 
         The heatmap is thresholded at an absolute cosine level rather than one
@@ -311,7 +318,8 @@ class PatchPropagator:
         its own strongest patch.
 
         Args:
-            heatmap: Cosine similarity per patch cell, shape ``(rows, cols)``.
+            heatmap: Best cosine similarity per patch cell, shape ``(rows, cols)``.
+            winners: Index of the prototype achieving that similarity, same shape.
 
         Returns:
             list: Candidates ordered by score, strongest first.
@@ -349,6 +357,7 @@ class PatchPropagator:
                     ),
                     peak=(int(peak_r), int(peak_c)),
                     cell_count=int(member.sum()),
+                    proto_index=int(winners[peak_r, peak_c]),
                 )
             )
 
@@ -356,14 +365,22 @@ class PatchPropagator:
         return candidates[:MAX_OBJECTS_PER_IMAGE]
 
     def localize_regions(
-        self, image_key: str, heatmap: np.ndarray, candidates: list[RegionCandidate]
+        self,
+        image_key: str,
+        heatmap: np.ndarray,
+        candidates: list[RegionCandidate],
+        prototypes: list[SeedPrototype],
     ) -> list[Detection] | None:
         """Refine every candidate region into a precise box with SAM.
 
+        Each region keeps the class of the prototype that won its peak cell, so a
+        frame holding two different kinds of object is labelled with both.
+
         Args:
             image_key: Target image key.
-            heatmap: Similarity heatmap for the winning prototype.
-            candidates: Regions found in that heatmap.
+            heatmap: Best-per-cell similarity map.
+            candidates: Regions found in that map.
+            prototypes: The prototype list the region indices refer to.
 
         Returns:
             list | None: Accepted detections, or None when the image cannot be read.
@@ -413,6 +430,16 @@ class PatchPropagator:
                     box, kept_mask = refined, mask
                     note = f"SAM {sam_score:.3f}"
 
+            proto = prototypes[candidate.proto_index]
+            detection = Detection(
+                box=box,
+                mask=kept_mask,
+                score=candidate.score,
+                note=note,
+                class_id=proto.class_id,
+                seed_key=proto.image_key,
+            )
+
             duplicate_of = next(
                 (i for i, existing in enumerate(detections) if iou(box, existing.box) > DUPLICATE_IOU),
                 None,
@@ -422,10 +449,10 @@ class PatchPropagator:
                 # occluder. Keep the stronger detection rather than emitting the
                 # same object twice.
                 if candidate.score > detections[duplicate_of].score:
-                    detections[duplicate_of] = Detection(box, kept_mask, candidate.score, note)
+                    detections[duplicate_of] = detection
                 continue
 
-            detections.append(Detection(box, kept_mask, candidate.score, note))
+            detections.append(detection)
 
         return detections
 
@@ -503,7 +530,8 @@ class PatchPropagator:
 
         for image_key in targets:
             grid = self.load_patch_grid(image_key)
-            score, proto, heatmap = self.match(grid, prototypes)
+            heatmap, winners = self.match(grid, prototypes)
+            score = float(heatmap.max())
 
             if score < REVIEW_THRESHOLD:
                 print(f"  [-]      {image_key} | {score:.4f} | below review threshold")
@@ -519,8 +547,8 @@ class PatchPropagator:
                 suppressed += 1
                 continue
 
-            candidates = self.find_object_regions(heatmap)
-            detections = self.localize_regions(image_key, heatmap, candidates)
+            candidates = self.find_object_regions(heatmap, winners)
+            detections = self.localize_regions(image_key, heatmap, candidates, prototypes)
             if not detections:
                 rejected += 1
                 continue
@@ -530,13 +558,14 @@ class PatchPropagator:
             # frame, because a missed object teaches the detector that the object
             # is background.
             weakest = min(d.score for d in detections)
+            best = max(detections, key=lambda d: d.score)
             decision = "AUTO" if weakest >= AUTO_ACCEPT_THRESHOLD else "REVIEW"
 
             label_path = self.label_dir / f"{image_key}.txt"
-            with open(label_path, "w") as f:
-                for detection in detections:
-                    xc, yc, w, h = detection.box
-                    f.write(f"{proto.class_id} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f}\n")
+            write_yolo_boxes(
+                str(label_path),
+                [(d.class_id, *d.box) for d in detections],
+            )
 
             masks = [d.mask for d in detections if d.mask is not None]
             if masks:
@@ -558,8 +587,8 @@ class PatchPropagator:
                         "score": round(score, 4),
                         "weakest_score": round(weakest, 4),
                         "object_count": len(detections),
-                        "seed_source": proto.image_key,
-                        "class_id": proto.class_id,
+                        "seed_source": best.seed_key,
+                        "class_id": best.class_id,
                         "label_path": os.path.abspath(label_path),
                         "image_path": resolve_image_path(self.image_dir, image_key),
                         "image_key": image_key,
@@ -571,10 +600,13 @@ class PatchPropagator:
                 review += 1
 
             objects += len(detections)
-            summary = ", ".join(f"{d.score:.3f} [{d.note}]" for d in detections)
+            names = load_classes()
+            summary = ", ".join(
+                f"{class_name(names, d.class_id)} {d.score:.3f} [{d.note}]" for d in detections
+            )
             print(
                 f"  [{decision:6}] {image_key} | best {score:.4f} | seed "
-                f"'{proto.image_key}' | {len(detections)} object(s): {summary}"
+                f"'{best.seed_key}' | {len(detections)} object(s): {summary}"
             )
 
         save_queue(queue, str(self.review_queue_path))

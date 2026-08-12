@@ -138,6 +138,24 @@ cell, so the similarity score alone decides. Detections overlapping by more than
 An image is auto-accepted only when **every** box in it clears the threshold. One
 uncertain instance is reason enough for a human to see the frame.
 
+The winning prototype is chosen per heatmap cell, not once per image, so a frame
+holding two different kinds of object is labelled with both classes rather than
+with whichever one matched strongest somewhere.
+
+### Correcting a class in review
+
+Similarity matching tells materials apart well and tells apart classes that
+differ only by *how many* of something is stacked poorly: the patches of a
+two-row stack and a three-row stack are identical, only the extent differs. Box
+geometry does not rescue this either — measured on this dataset, the same class
+varies by 35% in aspect ratio between the left and right of the frame, which is
+an order of magnitude more than the difference between the classes.
+
+So the review screen lets the class be corrected directly. The box stays as it
+is, only the class id is rewritten, and the entry stays queued so the correction
+still has to be accepted. The hard part is placing the box, and the machine has
+already done it.
+
 Every decision also writes a heatmap overlay to `data/debug/`, named
 `tier_score_image.jpg`, so results can be checked by eye rather than trusted.
 
