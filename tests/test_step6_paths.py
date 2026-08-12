@@ -9,11 +9,26 @@ Skipped when ultralytics is not installed, so the rest of the suite still runs
 on a machine without the training dependencies.
 """
 
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip("ultralytics", reason="training dependencies are not installed")
 
 from src.core.step6_train import BASE_MODEL, YoloTrainer  # noqa: E402
+
+
+def assert_is_stored_checkpoint(resolved: str) -> None:
+    """Assert a resolved path points at the stored checkpoint.
+
+    Compared as paths rather than as strings: the constant is written with
+    forward slashes and Windows hands back backslashes, which is correct on both
+    and unequal as text.
+
+    Args:
+        resolved: Path returned by the trainer.
+    """
+    assert Path(resolved) == Path(BASE_MODEL)
 
 
 def test_the_default_checkpoint_lives_with_the_other_weights():
@@ -54,7 +69,7 @@ def test_a_second_run_reuses_the_local_copy(project_sandbox):
     models.mkdir(parents=True)
     (models / "yolov8n.pt").write_bytes(b"weights")
 
-    assert YoloTrainer().resolve_base_model() == BASE_MODEL
+    assert_is_stored_checkpoint(YoloTrainer().resolve_base_model())
 
 
 def test_a_stray_checkpoint_is_adopted_rather_than_redownloaded(project_sandbox):
@@ -65,7 +80,7 @@ def test_a_stray_checkpoint_is_adopted_rather_than_redownloaded(project_sandbox)
     """
     (project_sandbox / "yolov8n.pt").write_bytes(b"weights")
 
-    assert YoloTrainer().resolve_base_model() == BASE_MODEL
+    assert_is_stored_checkpoint(YoloTrainer().resolve_base_model())
     assert not (project_sandbox / "yolov8n.pt").exists()
 
 
