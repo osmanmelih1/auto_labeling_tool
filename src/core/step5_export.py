@@ -26,6 +26,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from src.core.class_config import class_name, load_classes
+from src.core.yolo_format import read_yolo_boxes
 
 IMAGE_DIR = "data/deduplicated"
 LABEL_DIR = "data/labels"
@@ -49,20 +50,7 @@ def read_class_ids(label_path: Path) -> set[int]:
     Returns:
         set[int]: Every class id appearing on a well-formed line.
     """
-    ids: set[int] = set()
-    try:
-        with open(label_path) as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) != 5:
-                    continue
-                try:
-                    ids.add(int(parts[0]))
-                except ValueError:
-                    continue
-    except OSError as e:
-        print(f"  [-] Could not read {label_path.name}: {e}")
-    return ids
+    return {class_id for class_id, *_ in read_yolo_boxes(str(label_path))}
 
 
 class DatasetExporter:

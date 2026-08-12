@@ -58,6 +58,8 @@ from src.core.class_config import (  # noqa: E402
     load_classes,
     save_class_records,
 )
+from src.core.tiers import AUTO_ACCEPT_THRESHOLD, REVIEW_THRESHOLD  # noqa: E402
+from src.core.yolo_format import read_yolo_boxes, yolo_box_to_pixels  # noqa: E402
 from src.core.review_queue import (  # noqa: E402
     accept,
     clear_rejections,
@@ -65,11 +67,6 @@ from src.core.review_queue import (  # noqa: E402
     reject,
     save_queue,
 )
-
-try:
-    from src.core.step4_propagation import AUTO_ACCEPT_THRESHOLD, REVIEW_THRESHOLD
-except Exception:
-    AUTO_ACCEPT_THRESHOLD, REVIEW_THRESHOLD = 0.86, 0.78
 
 
 def class_qcolor(class_id: int) -> QColor:
@@ -203,12 +200,18 @@ class ZoomableGraphicsView(QGraphicsView):
     would otherwise write a seed label, and a bad seed poisons the prototype pool
     for the whole propagation run.
 
+    Confirmed boxes stay on the canvas so several objects can be marked in one
+    frame, and so returning to a frame shows what is already labelled instead of
+    inviting a duplicate.
+
     Attributes:
         box_drawn_signal: Emitted with the confirmed box in scene coordinates.
+        box_removed_signal: Emitted when the user deletes the most recent box.
         status_msg_signal: Emitted with short status text for the console panel.
     """
 
     box_drawn_signal = pyqtSignal(QRect)
+    box_removed_signal = pyqtSignal()
     status_msg_signal = pyqtSignal(str)
 
     def __init__(self):
@@ -232,6 +235,7 @@ class ZoomableGraphicsView(QGraphicsView):
         self.image_item = None
         self.current_rect_item = None
         self.pending_rect_item = None
+        self.confirmed_items: list = []
         self.start_pos = None
         self.mouse_pos = None
 
@@ -247,12 +251,36 @@ class ZoomableGraphicsView(QGraphicsView):
         self.scene.clear()
         self.current_rect_item = None
         self.pending_rect_item = None
+        self.confirmed_items = []
 
         pixmap = QPixmap(image_path)
         self.image_item = self.scene.addPixmap(pixmap)
 
         self.setSceneRect(0, 0, pixmap.width(), pixmap.height())
         self.fitInView(self.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def add_confirmed_box(self, rect: QRect, class_id: int) -> None:
+        """Draw a box that is already part of this image's label set.
+
+        Args:
+            rect: Box in image pixel coordinates.
+            class_id: Class the box belongs to, used to colour it.
+        """
+        pen = QPen(class_qcolor(class_id), 2)
+        pen.setCosmetic(True)
+        item = self.scene.addRect(QRectF(rect), pen)
+        self.confirmed_items.append(item)
+
+    def remove_last_confirmed(self) -> bool:
+        """Delete the most recently confirmed box from the canvas.
+
+        Returns:
+            bool: True when a box was removed, False when there was none.
+        """
+        if not self.confirmed_items:
+            return False
+        self.scene.removeItem(self.confirmed_items.pop())
+        return True
 
     def drawForeground(self, painter, rect):
         """Draw the crosshair that follows the cursor.
@@ -381,28 +409,31 @@ class ZoomableGraphicsView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event):
-        """Confirm the pending box with Enter, or discard it with Escape.
+        """Confirm with Enter, discard with Escape, delete the last box with Backspace.
 
         Args:
             event: Qt key event.
         """
         if self.pending_rect_item:
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                pen = QPen(QColor(0, 255, 0), 2)
-                pen.setCosmetic(True)
-                self.pending_rect_item.setPen(pen)
-
                 rect = self.pending_rect_item.rect()
                 final_rect = QRect(int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height()))
 
-                self.box_drawn_signal.emit(final_rect)
+                self.scene.removeItem(self.pending_rect_item)
                 self.pending_rect_item = None
+
+                # The listener adds the box back in its class colour, so it is
+                # drawn once, by whoever knows which class was selected.
+                self.box_drawn_signal.emit(final_rect)
 
             elif event.key() == Qt.Key.Key_Escape:
                 self.scene.removeItem(self.pending_rect_item)
                 self.pending_rect_item = None
                 self.viewport().update()
                 self.status_msg_signal.emit("[-] Box canceled.")
+
+        elif event.key() in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+            self.box_removed_signal.emit()
 
         super().keyPressEvent(event)
 
@@ -1180,6 +1211,7 @@ class AutoLabelingApp(QMainWindow):
         self.setWindowTitle("Auto Labeling Tool - Pro Canvas GUI")
         self.resize(1100, 800)
         self.current_image_path = None
+        self.pending_boxes: list[dict] = []
         self.setup_ui()
         self.refresh_class_combo()
         self.update_review_badge()
@@ -1257,7 +1289,13 @@ class AutoLabelingApp(QMainWindow):
         self.btn_load.setObjectName("loadBtn")
         self.btn_load.clicked.connect(self.open_image_dialog)
         sidebar_layout.addWidget(self.btn_load)
-        sidebar_layout.addSpacing(20)
+
+        self.box_count_label = QLabel("")
+        self.box_count_label.setStyleSheet(
+            "color:#9fd4a8; font-size:11px; font-weight:normal; margin:2px 12px 0px 12px;"
+        )
+        sidebar_layout.addWidget(self.box_count_label)
+        sidebar_layout.addSpacing(16)
 
         self.buttons = []
         steps = [
@@ -1298,6 +1336,7 @@ class AutoLabelingApp(QMainWindow):
 
         self.canvas = ZoomableGraphicsView()
         self.canvas.box_drawn_signal.connect(self.on_box_drawn)
+        self.canvas.box_removed_signal.connect(self.on_box_removed)
         self.canvas.status_msg_signal.connect(self.append_log_newline)
         splitter.addWidget(self.canvas)
 
@@ -1336,14 +1375,57 @@ class AutoLabelingApp(QMainWindow):
             self.current_image_path = file_path
             self.canvas.load_image(file_path)
             self.append_log(f"\n[*] Image loaded: {os.path.basename(file_path)}\n")
-            self.append_log("[*] TIP: Use Scroll to Zoom, Right-Click to Pan.\n")
+            self.append_log("[*] TIP: scroll to zoom, right-drag to pan, Backspace to undo a box.\n")
+            self.load_existing_boxes()
             self.canvas.setFocus()
 
-    def on_box_drawn(self, rect: QRect):
-        """Write a confirmed canvas box to the file Step 3b reads.
+    def load_existing_boxes(self):
+        """Show the boxes already labelled on this image and adopt them for editing.
 
-        The box is handed over as JSON rather than by calling into the step, so
-        the GUI and the step stay decoupled.
+        Without this, returning to a frame would show a blank canvas and the next
+        Step 3b run would overwrite its label file, silently discarding whatever
+        was already there.
+        """
+        self.pending_boxes = []
+        if not self.current_image_path:
+            return
+
+        stem = os.path.splitext(os.path.basename(self.current_image_path))[0]
+        label_path = os.path.join("data/labels", f"{stem}.txt")
+        if not os.path.exists(label_path):
+            self.update_box_count()
+            return
+
+        pixmap = QPixmap(self.current_image_path)
+        width, height = pixmap.width(), pixmap.height()
+
+        for class_id, xc, yc, w, h in read_yolo_boxes(label_path):
+            x0, y0, x1, y1 = yolo_box_to_pixels((xc, yc, w, h), width, height)
+            rect = QRect(x0, y0, x1 - x0, y1 - y0)
+            self.pending_boxes.append({"class_id": class_id, "bbox": [x0, y0, x1 - x0, y1 - y0]})
+            self.canvas.add_confirmed_box(rect, class_id)
+
+        self.append_log(f"[*] {len(self.pending_boxes)} existing box(es) loaded for this image.\n")
+        self.write_seed_file()
+        self.update_box_count()
+
+    def write_seed_file(self):
+        """Hand the current box list to Step 3b through data/temp_seed.json.
+
+        The boxes travel as JSON rather than by calling into the step, so the GUI
+        and the step stay decoupled.
+        """
+        os.makedirs("data", exist_ok=True)
+        with open("data/temp_seed.json", "w") as f:
+            json.dump({"image_path": self.current_image_path, "boxes": self.pending_boxes}, f)
+
+    def update_box_count(self):
+        """Show how many boxes are staged for the current image."""
+        count = len(self.pending_boxes)
+        self.box_count_label.setText(f"{count} box(es) on this image" if count else "")
+
+    def on_box_drawn(self, rect: QRect):
+        """Add a confirmed canvas box to this image's box list.
 
         Args:
             rect: Confirmed box in image pixel coordinates.
@@ -1353,21 +1435,35 @@ class AutoLabelingApp(QMainWindow):
             self.append_log("[-] No classes defined. Use 'Manage Classes' to add one before drawing a box.\n")
             return
 
-        seed_data = {
-            "image_path": self.current_image_path,
-            "class_id": class_id,
-            "bbox": [rect.x(), rect.y(), rect.width(), rect.height()],
-        }
-
-        os.makedirs("data", exist_ok=True)
-        with open("data/temp_seed.json", "w") as f:
-            json.dump(seed_data, f)
-
-        self.append_log(f"[+] Box Confirmed! Class: {self.class_combo.currentText()}\n")
-        self.append_log(
-            f"    Coordinates -> X:{rect.x()}, Y:{rect.y()}, W:{rect.width()}, H:{rect.height()}\n"
+        self.pending_boxes.append(
+            {"class_id": class_id, "bbox": [rect.x(), rect.y(), rect.width(), rect.height()]}
         )
-        self.append_log("[*] Data saved! You can now click '3b. Manual Seeding' to generate the YOLO mask.\n")
+        self.canvas.add_confirmed_box(rect, class_id)
+        self.write_seed_file()
+        self.update_box_count()
+
+        self.append_log(
+            f"[+] Box {len(self.pending_boxes)} confirmed: {self.class_combo.currentText()} "
+            f"at X:{rect.x()} Y:{rect.y()} W:{rect.width()} H:{rect.height()}\n"
+        )
+        self.append_log(
+            "[*] Draw more boxes for other objects in this frame, then run '3b. Manual Seeding'.\n"
+        )
+
+    def on_box_removed(self):
+        """Drop the most recently added box, in response to Backspace."""
+        if not self.pending_boxes:
+            return
+        if not self.canvas.remove_last_confirmed():
+            return
+
+        removed = self.pending_boxes.pop()
+        self.write_seed_file()
+        self.update_box_count()
+        self.append_log(
+            f"[-] Removed the last box ({class_name(load_classes(), removed['class_id'])}). "
+            f"{len(self.pending_boxes)} left.\n"
+        )
 
     def set_buttons_state(self, enabled: bool):
         """Enable or disable every action button.

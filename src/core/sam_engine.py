@@ -135,36 +135,3 @@ def mask_to_yolo_box(mask: np.ndarray) -> tuple[float, float, float, float] | No
         w / img_w,
         h / img_h,
     )
-
-
-def yolo_box_to_pixels(
-    box: tuple[float, float, float, float], img_w: int, img_h: int
-) -> tuple[int, int, int, int]:
-    """Convert a normalised YOLO box into pixel corner coordinates.
-
-    Args:
-        box: ``(x_center, y_center, width, height)`` normalised to [0, 1].
-        img_w: Image width in pixels.
-        img_h: Image height in pixels.
-
-    Returns:
-        tuple: ``(x_min, y_min, x_max, y_max)`` clamped to the image bounds.
-    """
-    xc, yc, w, h = box
-    x_min = int(max(0, (xc - w / 2) * img_w))
-    y_min = int(max(0, (yc - h / 2) * img_h))
-    x_max = int(min(img_w, (xc + w / 2) * img_w))
-    y_max = int(min(img_h, (yc + h / 2) * img_h))
-    return x_min, y_min, x_max, y_max
-
-
-def box_area(box: tuple[float, float, float, float]) -> float:
-    """Return the normalised area of a YOLO box.
-
-    Args:
-        box: ``(x_center, y_center, width, height)`` normalised to [0, 1].
-
-    Returns:
-        float: Width multiplied by height.
-    """
-    return box[2] * box[3]

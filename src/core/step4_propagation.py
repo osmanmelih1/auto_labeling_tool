@@ -47,24 +47,10 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from src.core.review_queue import REVIEW_QUEUE_PATH, add_pending, is_suppressed, load_queue, save_queue
-from src.core.sam_engine import SamEngine, box_area, mask_to_yolo_box, yolo_box_to_pixels
+from src.core.sam_engine import SamEngine, mask_to_yolo_box
+from src.core.tiers import AUTO_ACCEPT_THRESHOLD, DETECTION_LEVEL, REVIEW_THRESHOLD
+from src.core.yolo_format import box_area, iou, read_yolo_boxes, yolo_box_to_pixels
 
-# --- Confidence Tier Configuration ---
-# Calibrated against the first validation run, where images that genuinely
-# contained the seeded object scored 0.82-0.91 and images that did not scored
-# 0.69-0.76. The thresholds sit deliberately on the cautious side of that gap:
-# with only a few seeds most true matches land in the review queue rather than
-# being accepted outright. Tighten them once the score distribution over the full
-# dataset is known, not before.
-AUTO_ACCEPT_THRESHOLD = 0.86
-REVIEW_THRESHOLD = 0.78
-
-# A heatmap cell belongs to an object region when its similarity reaches this
-# absolute level. It is tied to the review threshold on purpose: a region is worth
-# proposing exactly when its best patch would pass human review. Using a level
-# relative to the frame's own peak instead would define "hot" in terms of the
-# single strongest match and hide every dimmer instance of the same object.
-DETECTION_LEVEL = 0.78
 
 # A region qualifies on its similarity score, not on its size. A distant object
 # can occupy a single patch cell, and discarding one-cell regions silently drops
@@ -119,33 +105,6 @@ def resolve_image_path(image_dir: str, image_key: str) -> str | None:
     return None
 
 
-def read_yolo_boxes(label_path: str) -> list[tuple[int, float, float, float, float]]:
-    """Parse a YOLO label file into class ids and normalised boxes.
-
-    Malformed lines are skipped rather than aborting the run: one bad label
-    should not stop propagation across thousands of images.
-
-    Args:
-        label_path: Path to a YOLO .txt label file.
-
-    Returns:
-        list: One ``(class_id, x_center, y_center, width, height)`` per valid line.
-    """
-    boxes: list[tuple[int, float, float, float, float]] = []
-    with open(label_path) as f:
-        for line in f:
-            parts = line.split()
-            if len(parts) != 5:
-                continue
-            try:
-                class_id = int(parts[0])
-                xc, yc, w, h = (float(p) for p in parts[1:])
-            except ValueError:
-                continue
-            boxes.append((class_id, xc, yc, w, h))
-    return boxes
-
-
 def unit(vectors: np.ndarray) -> np.ndarray:
     """Normalise vectors to unit length along their last axis.
 
@@ -157,27 +116,6 @@ def unit(vectors: np.ndarray) -> np.ndarray:
     """
     norms = np.linalg.norm(vectors, axis=-1, keepdims=True)
     return vectors / (norms + 1e-8)
-
-
-def iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
-    """Compute intersection over union for two normalised YOLO boxes.
-
-    Args:
-        a: First box as ``(x_center, y_center, width, height)``.
-        b: Second box in the same format.
-
-    Returns:
-        float: Overlap ratio between 0 and 1.
-    """
-    ax0, ay0, ax1, ay1 = a[0] - a[2] / 2, a[1] - a[3] / 2, a[0] + a[2] / 2, a[1] + a[3] / 2
-    bx0, by0, bx1, by1 = b[0] - b[2] / 2, b[1] - b[3] / 2, b[0] + b[2] / 2, b[1] + b[3] / 2
-
-    inter_w = max(0.0, min(ax1, bx1) - max(ax0, bx0))
-    inter_h = max(0.0, min(ay1, by1) - max(ay0, by0))
-    intersection = inter_w * inter_h
-
-    union = a[2] * a[3] + b[2] * b[3] - intersection
-    return intersection / union if union > 0 else 0.0
 
 
 @dataclass
