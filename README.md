@@ -71,8 +71,8 @@ human already turned down, every rejected image would be proposed again on every
 run — on a few thousand images that means rejecting the same wrong box over and
 over.
 
-Rejecting an entry therefore deletes its label file *and* records the score it
-was rejected at. Later runs skip it while its score stays within
+Rejecting an entry therefore deletes its label file and its mask *and* records
+the score it was rejected at. Later runs skip it while its score stays within
 `REPROPOSE_MARGIN` (0.05) of that value. If a run scores it clearly higher, the
 seed pool has learned something new and the image is worth a second look, so it
 comes back.
@@ -260,6 +260,28 @@ Hugging Face and accept the DINOv3 license first.
 
 **Grounding DINO** (`IDEA-Research/grounding-dino-base`) is fetched automatically by
 `transformers` on first run of Step 3a and cached in the Hugging Face cache directory.
+
+**YOLOv8n** (`yolov8n.pt`) is downloaded by Ultralytics on the first training run.
+Ultralytics puts a missing checkpoint in the current working directory rather than
+where it was asked to, so Step 7 moves it into `data/models/` afterwards and reuses
+it from there. Nothing is left at the project root.
+
+### Where things live
+
+Everything the pipeline reads and writes is under `data/`, with two deliberate
+exceptions: `datasets/` and `runs/`. Those are Ultralytics' own conventions, and a
+`data.yaml` that points at the standard layout is worth more than consistency with
+our own directory rule — the exported dataset should be usable by anyone who knows
+YOLO and has never seen this tool. Both are git-ignored.
+
+Inside `data/`, three kinds of file are mixed together and it is worth knowing
+which is which before deleting anything:
+
+| File | Kind | If you delete it |
+| --- | --- | --- |
+| `classes.json` | project configuration | the class scheme is gone; existing labels become meaningless |
+| `review_queue.json` | pipeline state | pending decisions and the rejection history are lost |
+| `temp_seed.json`, `current_prompt.json` | GUI-to-step messages | nothing; they are rewritten on the next action |
 
 ---
 

@@ -594,6 +594,10 @@ class PatchPropagator:
                         "seed_source": best.seed_key,
                         "class_id": best.class_id,
                         "label_path": os.path.abspath(label_path),
+                        # Recorded so rejecting a frame can remove everything it
+                        # produced. A mask left behind after its label is gone
+                        # is an orphan nothing will ever clean up.
+                        "mask_path": (os.path.abspath(self.mask_dir / f"{image_key}.png") if masks else None),
                         "image_path": resolve_image_path(self.image_dir, image_key),
                         "image_key": image_key,
                         "flagged_at": datetime.now(UTC).isoformat(),

@@ -14,7 +14,6 @@ deliberately free of heavy dependencies, so this process never loads torch. It
 runs no model of its own.
 """
 
-import contextlib
 import json
 import os
 import subprocess
@@ -961,12 +960,33 @@ class ReviewQueueDialog(QDialog):
         self._remove_card(image_key)
         self._log(f"[+] Accepted: {image_key} (score: {entry.get('score')})")
 
-    def _reject_one(self, image_key: str):
-        """Reject a queued label, delete its .txt file and remember the rejection.
+    def _discard_outputs(self, entry: dict):
+        """Delete everything propagation produced for a rejected frame.
 
-        Deleting the label matters: one left on disk would be picked up as a seed
-        prototype by the next propagation run. Recording the rejection matters
-        just as much, otherwise the same image is proposed again on every run.
+        Deleting the label matters most: one left on disk would be picked up as a
+        seed prototype by the next run, so a rejected box would come back as
+        something the tool believes in. The mask is deleted for a duller reason —
+        nothing else will ever remove it, and orphans accumulate silently.
+
+        Args:
+            entry: The queue record being rejected.
+        """
+        key = entry.get("image_key", "?")
+
+        paths = [entry.get("label_path"), entry.get("mask_path")]
+        if not entry.get("mask_path"):
+            # Entries queued before masks were recorded still have one on disk.
+            paths.append(os.path.join("data/masks", f"{key}.png"))
+
+        for path in paths:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError as e:
+                    self._log(f"[!] Could not remove {os.path.basename(path)} ({key}): {e}")
+
+    def _reject_one(self, image_key: str):
+        """Reject a queued label, delete what it produced and remember the rejection.
 
         Args:
             image_key: Key of the entry to reject.
@@ -974,12 +994,7 @@ class ReviewQueueDialog(QDialog):
         entry = reject(self.queue_data, image_key)
         if entry is None:
             return
-        label_path = entry.get("label_path")
-        if label_path and os.path.exists(label_path):
-            try:
-                os.remove(label_path)
-            except OSError as e:
-                self._log(f"[!] Could not remove label file ({image_key}): {e}")
+        self._discard_outputs(entry)
         self.session_rejected += 1
         self._save_queue()
         self._remove_card(image_key)
@@ -1045,10 +1060,7 @@ class ReviewQueueDialog(QDialog):
         for key in keys:
             entry = reject(self.queue_data, key)
             if entry:
-                label_path = entry.get("label_path")
-                if label_path and os.path.exists(label_path):
-                    with contextlib.suppress(OSError):
-                        os.remove(label_path)
+                self._discard_outputs(entry)
         self.session_rejected += len(keys)
         self._save_queue()
         self._populate_cards()

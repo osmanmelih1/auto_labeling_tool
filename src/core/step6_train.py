@@ -19,6 +19,7 @@ Output: ``runs/<name>/weights/best.pt`` and the usual Ultralytics artefacts
 """
 
 import os
+import shutil
 from pathlib import Path
 
 import torch
@@ -31,7 +32,12 @@ RUN_NAME = "train"
 # Nano is the right default here: the datasets this tool produces start small, and
 # a larger backbone would overfit them while taking far longer to tell us whether
 # the labels are usable.
-BASE_MODEL = "yolov8n.pt"
+#
+# The path matters as much as the name. Ultralytics downloads a checkpoint it
+# cannot find into the current working directory, which is how stray .pt files
+# accumulate at the repository root; every other weight this project uses lives
+# in data/models, and so should this one.
+BASE_MODEL = "data/models/yolov8n.pt"
 
 EPOCHS = 100
 IMAGE_SIZE = 640
@@ -155,6 +161,47 @@ class YoloTrainer:
             print(f"[*] Batch size reduced from {self.batch_size} to {batch} to fit the dataset.")
         return max(batch, 1)
 
+    def resolve_base_model(self) -> str:
+        """Return the checkpoint to fine-tune from, keeping it under ``data/models``.
+
+        Ultralytics fetches a checkpoint it cannot find, and it fetches it into
+        the current working directory rather than to the path it was asked for.
+        Left alone that scatters .pt files across the repository root. Here the
+        download is allowed to happen and the file is then moved to where every
+        other weight in this project lives, so the second run finds it locally.
+
+        Returns:
+            str: Path to a checkpoint that exists on disk, or the bare asset name
+            on the first run, when only Ultralytics can supply it.
+        """
+        target = Path(self.base_model)
+        if target.exists():
+            return str(target)
+
+        stray = Path(target.name)
+        if stray.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(stray), str(target))
+            print(f"[*] Moved {stray} into {target.parent} where the other weights live.")
+            return str(target)
+
+        print(f"[*] {target} not found. Ultralytics will download {target.name} and it will be kept there.")
+        return target.name
+
+    def tidy_base_model(self) -> None:
+        """Move a freshly downloaded checkpoint out of the project root.
+
+        Called after training, because the download only happens once Ultralytics
+        loads the model. Without this the file stays at the root and the next run
+        would download it again into the same place.
+        """
+        target = Path(self.base_model)
+        stray = Path(target.name)
+        if stray.exists() and not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(stray), str(target))
+            print(f"[+] Stored {target.name} in {target.parent} for the next run.")
+
     def report_device(self) -> None:
         """Print which device will be used and how much memory it has."""
         if self.device == "cpu":
@@ -181,7 +228,7 @@ class YoloTrainer:
         project = Path(self.output_dir).resolve()
         project.mkdir(parents=True, exist_ok=True)
 
-        model = YOLO(self.base_model)
+        model = YOLO(self.resolve_base_model())
         results = model.train(
             data=str(self.data_yaml.resolve()),
             epochs=self.epochs,
@@ -195,6 +242,7 @@ class YoloTrainer:
             plots=True,
         )
 
+        self.tidy_base_model()
         self.report_results(results)
 
     def report_results(self, results) -> None:
