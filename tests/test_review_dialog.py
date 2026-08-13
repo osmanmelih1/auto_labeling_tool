@@ -258,6 +258,60 @@ def test_a_decision_is_timed(dialog):
     assert len(dlg.decision_times) == 2
 
 
+def test_closing_writes_the_session_to_disk(dialog, project_sandbox):
+    """The console panel dies with the window; the measurement must not.
+
+    Args:
+        dialog: The review dialog and its entries.
+        project_sandbox: The sandboxed project root.
+    """
+    dlg, _ = dialog
+    dlg._show_preview(dlg.queue_data["pending"][dlg._order[0]])
+    dlg.accept_next_btn.click()
+    dlg.reject_next_btn.click()
+
+    dlg.close()
+
+    lines = (project_sandbox / "data" / "review_sessions.jsonl").read_text(encoding="utf-8").splitlines()
+    record = json.loads(lines[-1])
+    assert record["accepted"] == 1
+    assert record["rejected"] == 1
+    assert record["still_pending"] == 1
+
+
+def test_sessions_accumulate_rather_than_overwrite(dialog, project_sandbox):
+    """Two sittings in one day are two records, not one.
+
+    Args:
+        dialog: The review dialog and its entries.
+        project_sandbox: The sandboxed project root.
+    """
+    dlg, _ = dialog
+    dlg._show_preview(dlg.queue_data["pending"][dlg._order[0]])
+    dlg.accept_next_btn.click()
+    dlg.close()
+    dlg.session_accepted = 0
+    dlg.accept_next_btn.click()
+    dlg.close()
+
+    lines = (project_sandbox / "data" / "review_sessions.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+
+
+def test_a_sitting_with_no_decisions_writes_nothing(dialog, project_sandbox):
+    """Opening the screen and closing it again is not a review session.
+
+    Args:
+        dialog: The review dialog and its entries.
+        project_sandbox: The sandboxed project root.
+    """
+    dlg, _ = dialog
+
+    dlg.close()
+
+    assert not (project_sandbox / "data" / "review_sessions.jsonl").exists()
+
+
 def test_bulk_reject_removes_every_label(dialog, monkeypatch):
     """Bulk actions take the same path as single ones, including the masks.
 

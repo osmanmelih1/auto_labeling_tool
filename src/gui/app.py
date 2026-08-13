@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QThread, pyqtSignal
@@ -61,7 +62,9 @@ from src.core.class_config import (  # noqa: E402
     save_class_records,
 )
 from src.core.review_queue import (  # noqa: E402
+    SESSION_LOG_PATH,
     accept,
+    append_session_record,
     clear_rejections,
     load_queue,
     reject,
@@ -966,17 +969,17 @@ class ReviewQueueDialog(QDialog):
         self._remove_card(image_key)
         self._log(f"[+] Accepted: {image_key} (score: {entry.get('score')})")
 
-    def _pace_summary(self) -> str | None:
-        """Describe how long a frame is taking and what the rest of the queue will cost.
+    def _median_seconds_per_frame(self) -> float | None:
+        """Return the median gap between decisions, in seconds.
 
-        The median gap between decisions is reported rather than the mean,
-        because a review session is not continuous: the reviewer answers the
-        door, reads a message, thinks hard about one difficult frame. A mean
-        over those gaps measures the interruptions. A median measures the work.
+        The median rather than the mean, because a review session is not
+        continuous: the reviewer answers the door, reads a message, thinks hard
+        about one difficult frame. A mean over those gaps measures the
+        interruptions. A median measures the work.
 
         Returns:
-            str | None: A one-line summary, or None before enough decisions have
-            been made for a median to mean anything.
+            float | None: Seconds per frame, or None before four decisions, when
+            a median over two gaps would not be a median.
         """
         if len(self.decision_times) < 4:
             return None
@@ -985,10 +988,23 @@ class ReviewQueueDialog(QDialog):
             later - earlier
             for earlier, later in zip(self.decision_times, self.decision_times[1:], strict=False)
         )
-        median = gaps[len(gaps) // 2]
+        return gaps[len(gaps) // 2]
+
+    def _pace_summary(self) -> str | None:
+        """Describe how long a frame is taking and what the rest of the queue will cost.
+
+        Returns:
+            str | None: A one-line summary, or None before enough decisions have
+            been made for a median to mean anything.
+        """
+        median = self._median_seconds_per_frame()
+        if median is None:
+            return None
+
+        decisions = len(self.decision_times) - 1
         remaining = len(self.queue_data.get("pending", {}))
 
-        summary = f"[*] Median {median:.1f} s per frame over {len(gaps)} decision(s)."
+        summary = f"[*] Median {median:.1f} s per frame over {decisions} decision(s)."
         if remaining:
             summary += (
                 f" At that pace the remaining {remaining} would take {median * remaining / 60:.0f} min."
@@ -1157,7 +1173,38 @@ class ReviewQueueDialog(QDialog):
             )
             pace = self._pace_summary()
             self._log(pace + "\n" if pace else "")
+            self._record_session()
         super().closeEvent(event)
+
+    def _record_session(self) -> None:
+        """Persist what this sitting cost, outside the window that measured it.
+
+        The console panel is cleared when the application closes, so the first
+        time review was timed the number was lost with it. A sitting is appended
+        to data/review_sessions.jsonl and echoed to stdout, both of which outlive
+        the dialog.
+        """
+        median = self._median_seconds_per_frame()
+        record = {
+            "finished_at": datetime.now(UTC).isoformat(),
+            "accepted": self.session_accepted,
+            "rejected": self.session_rejected,
+            "median_seconds_per_frame": round(median, 2) if median is not None else None,
+            "active_minutes": (
+                round((self.decision_times[-1] - self.decision_times[0]) / 60, 1)
+                if len(self.decision_times) > 1
+                else 0.0
+            ),
+            "still_pending": len(self.queue_data.get("pending", {})),
+        }
+
+        try:
+            append_session_record(record)
+        except OSError as e:
+            print(f"[!] Could not write the review session record: {e}")
+            return
+
+        print(f"[+] Review session recorded in {SESSION_LOG_PATH}: {json.dumps(record)}")
 
 
 class ClassManagerDialog(QDialog):

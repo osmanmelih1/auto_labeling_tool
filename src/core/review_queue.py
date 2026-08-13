@@ -27,6 +27,13 @@ from pathlib import Path
 
 REVIEW_QUEUE_PATH = "data/review_queue.json"
 
+# One line per review sitting. What review costs per frame is the number that
+# decides whether this pipeline needs a model in the loop, and the first time it
+# was measured the answer was printed to a console panel that died with the
+# window. A record that only exists while the application is open is not a
+# measurement.
+SESSION_LOG_PATH = "data/review_sessions.jsonl"
+
 # A rejected image is proposed again only once its score exceeds the score it was
 # rejected at by this much. Small enough that a genuinely improved match returns,
 # large enough that run-to-run noise does not resurrect it.
@@ -142,6 +149,23 @@ def reject(queue: dict, image_key: str) -> dict | None:
         "rejected_at": datetime.now(UTC).isoformat(),
     }
     return entry
+
+
+def append_session_record(record: dict, path: str = SESSION_LOG_PATH) -> None:
+    """Append one review sitting to the session log.
+
+    Written as JSON lines so sittings accumulate across days without any
+    read-modify-write, and so the file survives a crash mid-session with every
+    earlier line intact.
+
+    Args:
+        record: Facts about the sitting: counts, pace and timestamps.
+        path: Location of the session log.
+    """
+    file_path = Path(path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(file_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def clear_rejections(queue: dict) -> int:
