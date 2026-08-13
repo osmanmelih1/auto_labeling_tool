@@ -268,6 +268,39 @@ def test_dragging_on_empty_background_adds_a_box(editor):
     assert len(read_yolo_boxes(label_path)) == 3
 
 
+def test_the_crosshair_follows_the_cursor(editor):
+    """Lining a box edge up with an object edge is guesswork without it.
+
+    The seeding canvas has had a crosshair from the start; the editor did not,
+    which made correcting a box by a few pixels a matter of eye and hope.
+
+    Args:
+        editor: The editor and its label path.
+    """
+    view, _ = editor
+    assert view._cursor is None
+
+    drag_to(view, QPointF(120.0, 80.0))
+
+    assert view._cursor is not None
+    assert view._cursor.x() == pytest.approx(120.0, abs=DRAG_TOLERANCE_PX)
+    assert view._cursor.y() == pytest.approx(80.0, abs=DRAG_TOLERANCE_PX)
+
+
+def test_the_crosshair_is_dropped_when_the_pointer_leaves(editor):
+    """A crosshair frozen where the pointer last was is worse than none.
+
+    Args:
+        editor: The editor and its label path.
+    """
+    view, _ = editor
+    drag_to(view, QPointF(120.0, 80.0))
+
+    view.leaveEvent(QEvent(QEvent.Type.Leave))
+
+    assert view._cursor is None
+
+
 def test_clicking_a_box_to_select_it_is_not_an_edit(editor):
     """Selection must not rewrite the label or discard the machine's confidence.
 

@@ -454,10 +454,12 @@ canvas and the exporter both read them from `data/classes.json`.
 **Seeding canvas:** scroll to zoom, right-click drag to pan, left-click drag to draw a
 box, `Enter` to confirm, `Esc` to cancel, `Backspace` to delete the last box.
 
-**Review editor:** scroll to zoom, right-click drag to pan, click a box to select it,
-drag it to move, drag a handle to resize, drag on empty background to add a box,
-`1`–`9` to set the selected box's class, `Delete` to remove it, `A` to accept the
-frame and `R` to reject it — both move on to the next.
+**Review editor:** a crosshair follows the cursor, as on the seeding canvas, because
+lining a box edge up with an object edge is guesswork without one. Scroll to zoom,
+right-click drag to pan, click a box to select it, drag it to move, drag a handle to
+resize, drag on empty background to add a box, `1`–`9` to set the selected box's
+class, `Delete` to remove it, `A` to accept the frame and `R` to reject it — both
+move on to the next.
 
 Both canvases zoom about the cursor, and zooming out stops once the whole image
 fits. The scene is deliberately padded around the image: a `QGraphicsView` that

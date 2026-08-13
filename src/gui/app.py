@@ -643,7 +643,22 @@ class ReviewQueueDialog(QDialog):
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setStyleSheet("QScrollArea { border:none; background-color:#1e1e1e; }")
+        # Always visible rather than on demand. A queue of three hundred frames
+        # gives no clue how far down it goes if the only way to move is the
+        # wheel, and the bar doubles as the position indicator.
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.scroll_area.setStyleSheet("""
+            QScrollArea { border:none; background-color:#1e1e1e; }
+            QScrollBar:vertical {
+                background-color:#1e1e1e; width:12px; margin:0px; border:none;
+            }
+            QScrollBar::handle:vertical {
+                background-color:#4a4a4a; border-radius:6px; min-height:30px;
+            }
+            QScrollBar::handle:vertical:hover { background-color:#5f5f5f; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0px; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:none; }
+        """)
         self.scroll_content = QWidget()
         self.scroll_content.setStyleSheet("background-color:#1e1e1e;")
         self.scroll_layout = QVBoxLayout(self.scroll_content)

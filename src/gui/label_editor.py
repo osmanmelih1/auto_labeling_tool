@@ -228,6 +228,7 @@ class LabelEditorView(QGraphicsView):
         self._draft_item = None
         self._pan_start = None
         self._moved = False
+        self._cursor = None
 
     # ------------------------------------------------------------------ load
 
@@ -535,13 +536,26 @@ class LabelEditorView(QGraphicsView):
     # ----------------------------------------------------------------- events
 
     def drawForeground(self, painter, rect):
-        """Draw the resize handles of the selected box.
+        """Draw the cursor crosshair and the selected box's resize handles.
+
+        The crosshair is what makes a box edge line up with an object edge. The
+        seeding canvas has had one from the start; the review editor did not,
+        which made correcting a box by a few pixels guesswork.
 
         Args:
             painter: Painter supplied by Qt for the foreground layer.
             rect: Exposed scene rectangle to paint over.
         """
         super().drawForeground(painter, rect)
+
+        if self._cursor is not None and self._mode != "pan" and self.image_width:
+            pen = QPen(QColor(255, 255, 255, 150), 1)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            x, y = self._cursor.x(), self._cursor.y()
+            painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
+            painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
+
         if self.selected_index < 0:
             return
 
@@ -615,6 +629,9 @@ class LabelEditorView(QGraphicsView):
         """
         if not self.image_width:
             return
+
+        self._cursor = self.mapToScene(event.pos())
+        self.viewport().update()
 
         if self._mode == "pan" and self._pan_start is not None:
             delta = event.pos() - self._pan_start
@@ -711,6 +728,16 @@ class LabelEditorView(QGraphicsView):
                 index = self._add_box(self.default_class_id, rect, None)
                 self.select(index)
                 self._commit(f"[+] Box added as {class_name(load_classes(), self.default_class_id)}.")
+
+    def leaveEvent(self, event):
+        """Drop the crosshair when the pointer leaves the canvas.
+
+        Args:
+            event: Qt leave event.
+        """
+        self._cursor = None
+        self.viewport().update()
+        super().leaveEvent(event)
 
     def keyPressEvent(self, event):
         """Delete the selected box, clear the selection, or set its class by number.
