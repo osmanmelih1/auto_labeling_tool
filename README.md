@@ -131,6 +131,31 @@ manager therefore only appends, renames, and removes the last entry. Box colours
 are generated from the class id rather than stored, so any number of classes gets
 a readable palette without a per-project colour table.
 
+### Finding examples of a class the dataset barely has
+
+Every dataset has a rare class. Labelling more random frames does not fix it: a
+class that appears in one frame in a hundred still appears in one frame in a
+hundred however many are labelled. It has to be sought out, and opening frames
+at random to look for it is hours of work.
+
+The detector already has an opinion — it is simply below the threshold anything
+acts on. Asking it at a confidence nobody would trust turns the search into a
+shortlist:
+
+```bash
+uv run python -m src.tools.find_class_examples palet_1li
+uv run python -m src.tools.find_class_examples koli --limit 60 --confidence 0.02
+```
+
+Annotated previews land in `data/candidates/<class>/`, ranked, with the ones that
+do not yet carry a box of that class marked `NEW`. Frames that already have
+labels are searched too, because a frame labelled as one class may hold a missed
+instance of another, and that miss is the most interesting result.
+
+**It never writes to `data/labels/`.** It proposes reading, not labelling; what
+to do with a candidate is a judgement made in the seeding canvas or the label
+editor. A discovery tool that quietly labelled things would be worse than no tool.
+
 ### Changing the scheme after labelling has started
 
 A class list is not settled at the start of a project. It is settled a few
