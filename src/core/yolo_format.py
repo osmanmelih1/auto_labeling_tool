@@ -11,6 +11,9 @@ The format is the YOLO convention: one object per line, as
 normalised to [0, 1] against the image size.
 """
 
+from collections import Counter
+from pathlib import Path
+
 
 def read_yolo_boxes(label_path: str) -> list[tuple[int, float, float, float, float]]:
     """Parse a YOLO label file into class ids and normalised boxes.
@@ -46,6 +49,26 @@ def read_yolo_boxes(label_path: str) -> list[tuple[int, float, float, float, flo
         boxes.append((class_id, xc, yc, w, h))
 
     return boxes
+
+
+def count_boxes_per_class(label_dir: str) -> Counter:
+    """Count how many boxes in a directory carry each class id.
+
+    Two callers need this and neither owns it: the class editor, to say what a
+    class costs before it is removed, and the pre-labeller, to refuse to trust
+    itself on a class it has barely seen.
+
+    Args:
+        label_dir: Directory of YOLO label files.
+
+    Returns:
+        Counter: Box count keyed by class id.
+    """
+    counts: Counter = Counter()
+    for path in sorted(Path(label_dir).glob("*.txt")):
+        for class_id, *_ in read_yolo_boxes(str(path)):
+            counts[class_id] += 1
+    return counts
 
 
 def write_yolo_boxes(label_path: str, boxes: list[tuple[int, float, float, float, float]]) -> None:

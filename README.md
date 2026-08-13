@@ -41,6 +41,7 @@ data/raw/ ──[1]──> data/deduplicated/ ──[2]──> data/embeddings/e
 | 4 | `src/core/step4_propagation.py` | Patch-level propagation with localisation. |
 | 5 | `src/gui/app.py` (Review Queue) | Human-in-the-loop accept / reject for borderline matches. |
 | 6 | `src/core/step5_export.py` | Packages the labels into a YOLO dataset and writes `data.yaml`. |
+
 | 7 | `src/core/step6_train.py` | Fine-tunes a YOLO detector on the exported dataset. |
 | 8 | `src/core/step7_predict.py` | Pre-labels the remaining images with that detector and queues only what it is unsure about. |
 
@@ -62,6 +63,27 @@ Work the queue **least-confident first** after step 8. A frame the detector
 scores at 0.95 teaches nobody anything; the ones it found difficult are where a
 correction changes the next model. The sort control has `Score: Low → High` for
 this.
+
+### Three ways an image can have no boxes
+
+They look nearly identical on disk and mean opposite things, so the exporter
+treats each differently.
+
+| On disk | Means | Exported? |
+| --- | --- | --- |
+| No label file | Nobody has looked at this frame | **No** — to YOLO an unlabelled image asserts the frame is empty, and nobody checked |
+| Label file, still in the review queue | A machine proposed something; nobody has agreed | **No** — exporting a draft trains on an unreviewed guess |
+| Label file, empty, accepted | A human looked and confirmed there is nothing here | **Yes**, as a background image |
+
+The third is worth having. A detector that has never seen a confirmed-empty
+frame invents objects in one. They are capped at `BACKGROUND_SHARE` (10%) of the
+dataset, because a training set that is mostly empty frames teaches mostly
+emptiness.
+
+This is why the pre-labelling step queues the frames it found nothing in rather
+than skipping them. Such a frame is either a confirmed empty dock, which is worth
+training on, or an object the detector missed, which is worth catching. Both are
+settled in a couple of seconds by eye; neither is settled by ignoring the frame.
 
 ### Training measures the labels, not just the model
 

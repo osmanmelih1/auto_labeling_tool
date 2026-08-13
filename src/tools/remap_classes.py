@@ -25,25 +25,9 @@ from collections import Counter
 from pathlib import Path
 
 from src.core.class_config import CLASSES_FILE, load_class_records, save_class_records
-from src.core.yolo_format import read_yolo_boxes, write_yolo_boxes
+from src.core.yolo_format import count_boxes_per_class, read_yolo_boxes, write_yolo_boxes
 
 LABEL_DIR = "data/labels"
-
-
-def count_boxes_per_class(label_dir: str = LABEL_DIR) -> Counter:
-    """Count how many boxes carry each class id.
-
-    Args:
-        label_dir: Directory of YOLO label files.
-
-    Returns:
-        Counter: Box count keyed by class id.
-    """
-    counts: Counter = Counter()
-    for path in sorted(Path(label_dir).glob("*.txt")):
-        for class_id, *_ in read_yolo_boxes(str(path)):
-            counts[class_id] += 1
-    return counts
 
 
 def report(records: list[dict], counts: Counter) -> None:

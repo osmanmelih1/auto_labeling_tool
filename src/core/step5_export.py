@@ -3,10 +3,22 @@
 Packages the labelled images into the directory layout YOLO expects and writes
 the ``data.yaml`` that points at it.
 
-Only images that have a matching, non-empty label file are exported. An image
-without a label is not an unlabelled example to YOLO, it is an explicit negative
-sample, so silently including everything would teach the model that the object is
-absent from frames nobody ever reviewed.
+An image with no label file at all is skipped. To YOLO an unlabelled image is
+not an unknown, it is an explicit statement that the frame contains nothing, and
+including frames nobody reviewed would teach the model that the object is absent
+wherever the pipeline happened not to look.
+
+A frame still sitting in the review queue is skipped as well. Propagation and
+prediction write their proposals to disk before anyone has looked at them, so a
+label file existing is not the same as a label file being agreed with. Exporting
+one that is still queued trains the model on a draft.
+
+An image whose label file exists but is *empty* is a different claim, and a
+valuable one. It means a human looked and confirmed there is nothing here. Those
+are exported as background images, which is how a detector learns not to invent
+objects in an empty dock. They are capped at BACKGROUND_SHARE of the dataset:
+Ultralytics suggests around a tenth, and a training set that is mostly empty
+frames teaches mostly emptiness.
 
 The split is stratified over the set of classes present in each image rather than
 being a plain shuffle. With a few hundred images a uniform random split can put
@@ -26,6 +38,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from src.core.class_config import class_name, load_classes
+from src.core.review_queue import REVIEW_QUEUE_PATH, load_queue
 from src.core.yolo_format import read_yolo_boxes
 
 IMAGE_DIR = "data/deduplicated"
@@ -35,6 +48,11 @@ OUTPUT_DIR = "datasets"
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
 
 VAL_RATIO = 0.2
+
+# Share of the exported dataset allowed to be human-confirmed empty frames.
+# Background images reduce false positives; too many of them reduce everything
+# else.
+BACKGROUND_SHARE = 0.1
 # Fixed so that re-exporting the same labels reproduces the same split. Without
 # it, a model retrained after adding labels would be scored against a validation
 # set that had partly leaked into its previous training run.
@@ -86,8 +104,11 @@ class DatasetExporter:
             list: One ``(image_path, label_path, class_ids)`` per usable pair.
         """
         pairs: list[tuple[Path, Path, set[int]]] = []
+        backgrounds: list[tuple[Path, Path, set[int]]] = []
         unlabelled = 0
-        empty = 0
+        awaiting = 0
+
+        pending = set(load_queue(REVIEW_QUEUE_PATH).get("pending", {}))
 
         if not self.image_dir.exists():
             raise FileNotFoundError(f"[!] Image directory not found: {self.image_dir}")
@@ -101,20 +122,51 @@ class DatasetExporter:
                 unlabelled += 1
                 continue
 
+            if image_path.stem in pending:
+                awaiting += 1
+                continue
+
             class_ids = read_class_ids(label_path)
             if not class_ids:
-                empty += 1
+                backgrounds.append((image_path, label_path, class_ids))
                 continue
 
             pairs.append((image_path, label_path, class_ids))
 
+        kept = self.choose_backgrounds(pairs, backgrounds)
+        pairs.extend(kept)
+
         print(f"[+] {len(pairs)} image/label pair(s) ready for export.")
         if unlabelled:
             print(f"[*] {unlabelled} image(s) have no label and were skipped.")
-        if empty:
-            print(f"[*] {empty} label file(s) were empty or malformed and were skipped.")
+        if awaiting:
+            print(f"[!] {awaiting} image(s) are still in the review queue and were NOT exported.")
+        if backgrounds:
+            print(
+                f"[+] {len(kept)} of {len(backgrounds)} human-confirmed empty frame(s) "
+                f"included as background images."
+            )
 
         return pairs
+
+    def choose_backgrounds(self, pairs: list, backgrounds: list) -> list:
+        """Pick how many confirmed-empty frames to include.
+
+        Args:
+            pairs: The image/label pairs that contain objects.
+            backgrounds: Every available confirmed-empty frame.
+
+        Returns:
+            list: The subset to export, chosen deterministically.
+        """
+        if not backgrounds:
+            return []
+
+        # Solve for a count that is the requested share of the final total,
+        # rather than of the object-bearing images alone.
+        allowance = int(len(pairs) * BACKGROUND_SHARE / max(1 - BACKGROUND_SHARE, 1e-6))
+        chosen = sorted(backgrounds, key=lambda item: item[0].stem)[:allowance]
+        return chosen
 
     def split(
         self, pairs: list[tuple[Path, Path, set[int]]]

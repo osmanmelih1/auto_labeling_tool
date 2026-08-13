@@ -34,8 +34,8 @@ from ultralytics import YOLO
 
 from src.core.class_config import class_name, load_classes
 from src.core.review_queue import REVIEW_QUEUE_PATH, add_pending, is_suppressed, load_queue, save_queue
-from src.core.tiers import DETECTOR_AUTO_ACCEPT, DETECTOR_REVIEW
-from src.core.yolo_format import write_yolo_boxes, yolo_box_to_pixels
+from src.core.tiers import DETECTOR_AUTO_ACCEPT, DETECTOR_REVIEW, MIN_EXAMPLES_TO_TRUST
+from src.core.yolo_format import count_boxes_per_class, write_yolo_boxes, yolo_box_to_pixels
 
 IMAGE_DIR = "data/deduplicated"
 LABEL_DIR = "data/labels"
@@ -78,6 +78,7 @@ class DetectorPreLabeller:
         review_queue_path: str = REVIEW_QUEUE_PATH,
         auto_threshold: float = DETECTOR_AUTO_ACCEPT,
         review_threshold: float = DETECTOR_REVIEW,
+        min_examples: int = MIN_EXAMPLES_TO_TRUST,
     ) -> None:
         """Load the detector and prepare the output directories.
 
@@ -89,6 +90,8 @@ class DetectorPreLabeller:
             review_queue_path: Queue file shared with the GUI.
             auto_threshold: Confidence at or above which a box needs no human.
             review_threshold: Confidence below which a box is not proposed at all.
+            min_examples: Boxes a class needs in the dataset before its
+                confidence is trusted enough to auto-accept.
 
         Raises:
             FileNotFoundError: If no trained checkpoint can be found.
@@ -105,9 +108,15 @@ class DetectorPreLabeller:
         self.review_queue_path = review_queue_path
         self.auto_threshold = auto_threshold
         self.review_threshold = review_threshold
+        self.min_examples = min_examples
 
         self.label_dir.mkdir(parents=True, exist_ok=True)
         self.debug_dir.mkdir(parents=True, exist_ok=True)
+
+        # Filled in at the start of a run, once the labels on disk are the final
+        # word on how much evidence each class has.
+        self.class_counts: dict[int, int] = {}
+        self.untrusted_classes: set[int] = set()
 
         print(f"[*] Loading detector from {self.weights}...")
         self.model = YOLO(self.weights)
@@ -187,6 +196,35 @@ class DetectorPreLabeller:
         except Exception as e:
             print(f"  [-] {path.stem}: could not write preview ({e}).")
 
+    def queue_empty(self, queue: dict, key: str, image_path: Path, label_path: Path) -> None:
+        """Queue a frame the detector found nothing in, for a human to settle.
+
+        Args:
+            queue: The review queue, mutated in place.
+            key: Image key.
+            image_path: Source image.
+            label_path: The empty label file just written for it.
+        """
+        add_pending(
+            queue,
+            key,
+            {
+                "score": 0.0,
+                "weakest_score": 0.0,
+                "object_count": 0,
+                "box_scores": [],
+                "seed_source": os.path.basename(os.path.dirname(os.path.dirname(self.weights))),
+                "class_id": 0,
+                "label_path": os.path.abspath(label_path),
+                "mask_path": None,
+                "image_path": os.path.abspath(image_path),
+                "image_key": key,
+                "flagged_at": datetime.now(UTC).isoformat(),
+                "status": "pending_review",
+                "method": "detector_found_nothing",
+            },
+        )
+
     def run(self) -> None:
         """Pre-label every unlabelled image and tier the result."""
         targets = self.unlabelled_images()
@@ -195,8 +233,22 @@ class DetectorPreLabeller:
             return
 
         names = load_classes()
+        self.class_counts = count_boxes_per_class(str(self.label_dir))
+        self.untrusted_classes = {
+            class_id
+            for class_id in range(len(names))
+            if self.class_counts.get(class_id, 0) < self.min_examples
+        }
+
         print(f"[*] Pre-labelling {len(targets)} unlabelled image(s).")
-        print(f"[*] Tiers -> AUTO >= {self.auto_threshold} | REVIEW >= {self.review_threshold}\n")
+        print(f"[*] Tiers -> AUTO >= {self.auto_threshold} | REVIEW >= {self.review_threshold}")
+        if self.untrusted_classes:
+            thin = ", ".join(
+                f"{class_name(names, class_id)} ({self.class_counts.get(class_id, 0)})"
+                for class_id in sorted(self.untrusted_classes)
+            )
+            print(f"[*] Never auto-accepted, under {self.min_examples} example(s): {thin}")
+        print()
 
         queue = load_queue(self.review_queue_path)
         auto = review = empty = suppressed = objects = 0
@@ -205,7 +257,15 @@ class DetectorPreLabeller:
             key = path.stem
 
             if not detections:
-                print(f"  [-]      {key} | nothing found above {self.review_threshold}")
+                # Dropping these silently was the one option with no value in it.
+                # A frame the detector passed over is either a confirmed empty
+                # dock, which is worth training on, or an object it missed, which
+                # is worth catching. Both are cheap to settle by eye; neither is
+                # settled by ignoring the frame.
+                label_path = self.label_dir / f"{key}.txt"
+                write_yolo_boxes(str(label_path), [])
+                self.queue_empty(queue, key, path, label_path)
+                print(f"  [EMPTY ] {key} | nothing found above {self.review_threshold}")
                 empty += 1
                 continue
 
@@ -222,7 +282,18 @@ class DetectorPreLabeller:
             # when every box in it would be. One uncertain instance is reason
             # enough for a human to see the frame, because a missed object
             # teaches the next model that the object is background.
-            decision = "AUTO" if weakest >= self.auto_threshold else "REVIEW"
+            confident = weakest >= self.auto_threshold
+            # Counted per detection rather than against the precomputed set, so
+            # a class id the class list does not even define counts as unproven
+            # rather than slipping through as unlisted.
+            untrusted = sorted(
+                {
+                    class_id
+                    for class_id, _, _ in detections
+                    if self.class_counts.get(class_id, 0) < self.min_examples
+                }
+            )
+            decision = "AUTO" if confident and not untrusted else "REVIEW"
 
             label_path = self.label_dir / f"{key}.txt"
             write_yolo_boxes(str(label_path), [(class_id, *box) for class_id, _, box in detections])
@@ -257,7 +328,17 @@ class DetectorPreLabeller:
             summary = ", ".join(
                 f"{class_name(names, class_id)} {confidence:.3f}" for class_id, confidence, _ in detections
             )
-            print(f"  [{decision:6}] {key} | weakest {weakest:.3f} | {len(detections)} object(s): {summary}")
+            reason = ""
+            if untrusted and confident:
+                thin = ", ".join(
+                    f"{class_name(names, class_id)} has {self.class_counts.get(class_id, 0)}"
+                    for class_id in untrusted
+                )
+                reason = f" | held back: {thin} example(s)"
+            print(
+                f"  [{decision:6}] {key} | weakest {weakest:.3f} | "
+                f"{len(detections)} object(s): {summary}{reason}"
+            )
 
         save_queue(queue, self.review_queue_path)
 
@@ -266,7 +347,7 @@ class DetectorPreLabeller:
         print(f"    - Detector      : {self.weights}")
         print(f"    - Auto-accepted : {auto}")
         print(f"    - Review queue  : {review} (see {self.review_queue_path})")
-        print(f"    - Nothing found : {empty}")
+        print(f"    - Nothing found : {empty} (queued as empty; confirm or add the missed box)")
         if suppressed:
             print(f"    - Skipped       : {suppressed} previously rejected by a human")
         if labelled:
@@ -274,8 +355,8 @@ class DetectorPreLabeller:
             print(f"                      ({objects / labelled:.2f} per labelled image)")
         print(f"[*] Annotated previews written to {self.debug_dir} for visual inspection.")
 
-        if review:
-            print(f"[!] {review} image(s) awaiting approval in the GUI 'Review Queue'.")
+        if review or empty:
+            print(f"[!] {review + empty} image(s) awaiting approval in the GUI 'Review Queue'.")
             print("[*] Sort it by 'Score: Low -> High'. The frames the detector found hardest")
             print("    are the ones a correction teaches the most.")
 

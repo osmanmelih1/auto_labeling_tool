@@ -139,7 +139,10 @@ def prelabeller(project_sandbox, monkeypatch):
     weights.write_bytes(b"not really a checkpoint")
 
     monkeypatch.setattr("src.core.step7_predict.YOLO", lambda *a, **k: None)
-    prelabeller = DetectorPreLabeller(weights=str(weights))
+    # The scarce-class gate is exercised on its own below; these tests are about
+    # the confidence tiers, so it is switched off here rather than silently
+    # deciding their outcome.
+    prelabeller = DetectorPreLabeller(weights=str(weights), min_examples=0)
     prelabeller.model = FakeModel(
         {
             "confident": [FakeBox(2, 0.93, (0.3, 0.5, 0.2, 0.3)), FakeBox(2, 0.88, (0.7, 0.5, 0.2, 0.3))],
@@ -231,8 +234,12 @@ def test_the_queue_entry_carries_a_score_per_box(prelabeller):
     assert entry["method"] == "detector_prediction"
 
 
-def test_a_frame_with_no_detections_gets_no_label(prelabeller, project_sandbox):
-    """An empty label file would be exported as a confirmed-empty frame it is not.
+def test_a_frame_with_no_detections_is_queued_rather_than_dropped(prelabeller, project_sandbox):
+    """Ignoring these was the one option with no value in it.
+
+    A frame the detector passed over is either a confirmed empty dock, which is
+    worth training on, or an object it missed, which is worth catching. Spot
+    checking twelve of them on the real dataset turned up one missed pallet.
 
     Args:
         prelabeller: The pre-labeller under test.
@@ -240,8 +247,22 @@ def test_a_frame_with_no_detections_gets_no_label(prelabeller, project_sandbox):
     """
     prelabeller.run()
 
-    assert not (project_sandbox / "data" / "labels" / "nothing.txt").exists()
-    assert "nothing" not in load_queue(prelabeller.review_queue_path)["pending"]
+    entry = load_queue(prelabeller.review_queue_path)["pending"]["nothing"]
+    assert entry["object_count"] == 0
+    assert entry["method"] == "detector_found_nothing"
+    assert read_yolo_boxes(str(project_sandbox / "data" / "labels" / "nothing.txt")) == []
+
+
+def test_an_unreviewed_empty_frame_is_not_yet_a_confirmed_background(prelabeller, project_sandbox):
+    """The empty label only becomes a claim once a human accepts it.
+
+    Args:
+        prelabeller: The pre-labeller under test.
+        project_sandbox: The sandboxed project root.
+    """
+    prelabeller.run()
+
+    assert "nothing" in load_queue(prelabeller.review_queue_path)["pending"]
 
 
 def test_the_detector_is_asked_for_everything_above_the_review_floor(prelabeller):
@@ -253,6 +274,81 @@ def test_the_detector_is_asked_for_everything_above_the_review_floor(prelabeller
     prelabeller.run()
 
     assert prelabeller.model.conf_asked == prelabeller.review_threshold
+
+
+def test_a_class_with_almost_no_examples_is_never_auto_accepted(prelabeller):
+    """Confidence is calibrated by training data, so a class seen twice has none.
+
+    Observed on the real dataset: a detector with two examples of one class
+    reported 0.95 and 0.98 on new frames. Those labels would have entered the
+    next training set unread, and the error would compound every round.
+
+    Args:
+        prelabeller: The pre-labeller under test.
+    """
+    prelabeller.min_examples = 25
+    prelabeller.model = FakeModel({"confident": [FakeBox(2, 0.99, (0.3, 0.5, 0.2, 0.3))]})
+
+    prelabeller.run()
+
+    assert "confident" in load_queue(prelabeller.review_queue_path)["pending"]
+
+
+def test_a_well_evidenced_class_is_still_auto_accepted(prelabeller, project_sandbox):
+    """The gate must not turn every frame into review work.
+
+    Args:
+        prelabeller: The pre-labeller under test.
+        project_sandbox: The sandboxed project root.
+    """
+    labels = project_sandbox / "data" / "labels"
+    for index in range(30):
+        write_yolo_boxes(str(labels / f"seed_{index}.txt"), [(2, 0.5, 0.5, 0.2, 0.2)])
+
+    prelabeller.min_examples = 25
+    prelabeller.model = FakeModel({"confident": [FakeBox(2, 0.99, (0.3, 0.5, 0.2, 0.3))]})
+
+    prelabeller.run()
+
+    assert "confident" not in load_queue(prelabeller.review_queue_path)["pending"]
+
+
+def test_one_scarce_class_holds_back_the_whole_frame(prelabeller, project_sandbox):
+    """A frame is accepted outright only when every box in it can be.
+
+    Args:
+        prelabeller: The pre-labeller under test.
+        project_sandbox: The sandboxed project root.
+    """
+    labels = project_sandbox / "data" / "labels"
+    for index in range(30):
+        write_yolo_boxes(str(labels / f"seed_{index}.txt"), [(2, 0.5, 0.5, 0.2, 0.2)])
+
+    prelabeller.min_examples = 25
+    prelabeller.model = FakeModel(
+        {"confident": [FakeBox(2, 0.99, (0.3, 0.5, 0.2, 0.3)), FakeBox(4, 0.97, (0.7, 0.5, 0.2, 0.3))]}
+    )
+
+    prelabeller.run()
+
+    assert "confident" in load_queue(prelabeller.review_queue_path)["pending"]
+
+
+def test_the_boxes_are_still_written_when_a_frame_is_held_back(prelabeller, project_sandbox):
+    """Held back means "a human decides", not "the work is thrown away".
+
+    Args:
+        prelabeller: The pre-labeller under test.
+        project_sandbox: The sandboxed project root.
+    """
+    prelabeller.min_examples = 25
+    prelabeller.model = FakeModel({"confident": [FakeBox(2, 0.99, (0.3, 0.5, 0.2, 0.3))]})
+
+    prelabeller.run()
+
+    assert read_yolo_boxes(str(project_sandbox / "data" / "labels" / "confident.txt")) == [
+        (2, 0.3, 0.5, 0.2, 0.3)
+    ]
 
 
 def test_a_previously_rejected_frame_is_not_proposed_again(prelabeller):

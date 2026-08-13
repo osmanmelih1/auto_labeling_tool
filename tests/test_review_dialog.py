@@ -162,7 +162,7 @@ def test_deleting_the_last_box_warns_rather_than_looking_empty(dialog):
     dlg.delete_box_btn.click()
 
     assert read_yolo_boxes(entries["b"]["label_path"]) == []
-    assert "reject" in dlg.cards["b"].summary_label.text().lower()
+    assert "confirm empty" in dlg.cards["b"].summary_label.text().lower()
 
 
 def test_accepting_keeps_the_label_and_advances(dialog):

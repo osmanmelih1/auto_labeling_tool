@@ -514,7 +514,10 @@ class ReviewCardWidget(QFrame):
             counts[class_id] = counts.get(class_id, 0) + 1
 
         if not counts:
-            self.summary_label.setText("no boxes left — reject this frame")
+            # Two different frames arrive here: one the detector found nothing
+            # in, and one a human emptied. Accepting either is a claim that the
+            # frame really is empty, which the exporter then trains on.
+            self.summary_label.setText("no boxes — accept to confirm empty, or add the missed one")
             self.summary_label.setStyleSheet("color:#e0a030; font-size:11px; border:none;")
             return
 

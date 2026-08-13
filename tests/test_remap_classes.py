@@ -10,8 +10,8 @@ import json
 
 import pytest
 
-from src.core.yolo_format import read_yolo_boxes, write_yolo_boxes
-from src.tools.remap_classes import build_remap, count_boxes_per_class, main
+from src.core.yolo_format import count_boxes_per_class, read_yolo_boxes, write_yolo_boxes
+from src.tools.remap_classes import build_remap, main
 
 
 @pytest.fixture

@@ -43,3 +43,16 @@ DETECTION_LEVEL = REVIEW_THRESHOLD
 # the ones the model is unsure about, and a narrow band hides them.
 DETECTOR_AUTO_ACCEPT = 0.80
 DETECTOR_REVIEW = 0.30
+
+# A class with fewer than this many boxes in the dataset is never auto-accepted,
+# however confident the detector sounds.
+#
+# Confidence is calibrated by training data, so a class the model saw twice has
+# no calibration at all. Observed directly: a detector with two examples of one
+# class reported 0.95 and 0.98 on new frames — numbers that mean "certain" for a
+# class with three hundred examples and mean nothing here. Left alone those
+# labels enter the next training set unread, and the error compounds every round.
+#
+# This is not a tuned threshold. It is the statement that a number computed from
+# almost no data is not evidence.
+MIN_EXAMPLES_TO_TRUST = 25
