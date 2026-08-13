@@ -229,10 +229,23 @@ def main(argv: list[str] | None = None) -> int:
         help="how faint a suspicion to accept",
     )
     parser.add_argument("--weights", help="checkpoint to search with")
+    parser.add_argument(
+        "--image-dir",
+        default=IMAGE_DIR,
+        help=(
+            "where to search. Deduplication can discard the very frame a rare class "
+            "appears in, so point this at data/raw when the deduplicated pool comes up empty"
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
-        finder = ClassExampleFinder(args.target, weights=args.weights, confidence=args.confidence)
+        finder = ClassExampleFinder(
+            args.target,
+            weights=args.weights,
+            image_dir=args.image_dir,
+            confidence=args.confidence,
+        )
     except (FileNotFoundError, ValueError) as e:
         print(e)
         return 1
