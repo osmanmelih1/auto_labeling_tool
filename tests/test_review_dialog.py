@@ -205,6 +205,91 @@ def test_emptying_the_queue_clears_the_pane(dialog):
     assert dlg.accept_next_btn.isEnabled() is False
 
 
+def test_an_accidental_accept_can_be_taken_back(dialog):
+    """At a keystroke per frame a mistaken decision is a certainty, not an edge case.
+
+    Args:
+        dialog: The review dialog and its entries.
+    """
+    dlg, _ = dialog
+    dlg._show_preview(dlg.queue_data["pending"][dlg._order[0]])
+    key = dlg._order[0]
+    dlg.accept_next_btn.click()
+    assert key not in dlg.queue_data["pending"]
+
+    dlg.undo_btn.click()
+
+    assert key in dlg.queue_data["pending"]
+    assert dlg.session_accepted == 0
+
+
+def test_undoing_a_rejection_restores_the_label_it_deleted(dialog):
+    """Rejecting deletes the label file, so the boxes are read before it happens.
+
+    Args:
+        dialog: The review dialog and its entries.
+    """
+    dlg, records = dialog
+    dlg._show_preview(dlg.queue_data["pending"][dlg._order[0]])
+    key = dlg._order[0]
+    before = read_yolo_boxes(records[key]["label_path"])
+    dlg.reject_next_btn.click()
+    assert not os.path.exists(records[key]["label_path"])
+
+    dlg.undo_btn.click()
+
+    assert read_yolo_boxes(records[key]["label_path"]) == before
+    assert key in dlg.queue_data["pending"]
+    assert key not in dlg.queue_data["rejected"]
+
+
+def test_undo_walks_back_more_than_one_decision(dialog):
+    """A run of mistaken keystrokes is as likely as a single one.
+
+    Args:
+        dialog: The review dialog and its entries.
+    """
+    dlg, _ = dialog
+    dlg._show_preview(dlg.queue_data["pending"][dlg._order[0]])
+    for _ in range(3):
+        dlg.accept_next_btn.click()
+    assert dlg.queue_data["pending"] == {}
+
+    for _ in range(3):
+        dlg.undo_btn.click()
+
+    assert len(dlg.queue_data["pending"]) == 3
+
+
+def test_undo_with_nothing_to_undo_is_harmless(dialog):
+    """The button is always enabled; pressing it first must not raise.
+
+    Args:
+        dialog: The review dialog and its entries.
+    """
+    dlg, _ = dialog
+
+    dlg.undo_btn.click()
+
+    assert len(dlg.queue_data["pending"]) == 3
+
+
+def test_undo_does_not_leave_a_decision_in_the_pace_measurement(dialog):
+    """A decision that was taken back never happened, and must not be timed.
+
+    Args:
+        dialog: The review dialog and its entries.
+    """
+    dlg, _ = dialog
+    dlg._show_preview(dlg.queue_data["pending"][dlg._order[0]])
+    dlg.accept_next_btn.click()
+    dlg.accept_next_btn.click()
+
+    dlg.undo_btn.click()
+
+    assert len(dlg.decision_times) == 1
+
+
 def test_pace_is_not_reported_before_it_means_anything(dialog):
     """Two or three decisions cannot support a median; saying so is better than lying."""
     dlg, _ = dialog
@@ -277,6 +362,48 @@ def test_closing_writes_the_session_to_disk(dialog, project_sandbox):
     assert record["accepted"] == 1
     assert record["rejected"] == 1
     assert record["still_pending"] == 1
+
+
+def test_the_session_record_names_the_frames_decided(dialog, project_sandbox):
+    """Accepting does not touch the label file, so nothing else records what happened.
+
+    Without this list, "which frame did I just wave through?" has no answer
+    anywhere on disk — which is exactly the question asked after a mis-keyed
+    decision.
+
+    Args:
+        dialog: The review dialog and its entries.
+        project_sandbox: The sandboxed project root.
+    """
+    dlg, _ = dialog
+    dlg._show_preview(dlg.queue_data["pending"][dlg._order[0]])
+    first, second = dlg._order[0], dlg._order[1]
+    dlg.accept_next_btn.click()
+    dlg.reject_next_btn.click()
+
+    dlg.close()
+
+    lines = (project_sandbox / "data" / "review_sessions.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(lines[-1])["decided"] == [f"accept {first}", f"reject {second}"]
+
+
+def test_an_undone_decision_leaves_the_session_record(dialog, project_sandbox):
+    """A decision that was taken back never happened.
+
+    Args:
+        dialog: The review dialog and its entries.
+        project_sandbox: The sandboxed project root.
+    """
+    dlg, _ = dialog
+    dlg._show_preview(dlg.queue_data["pending"][dlg._order[0]])
+    dlg.accept_next_btn.click()
+    dlg.accept_next_btn.click()
+    dlg.undo_btn.click()
+
+    dlg.close()
+
+    lines = (project_sandbox / "data" / "review_sessions.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(json.loads(lines[-1])["decided"]) == 1
 
 
 def test_sessions_accumulate_rather_than_overwrite(dialog, project_sandbox):

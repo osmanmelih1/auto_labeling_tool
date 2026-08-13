@@ -153,6 +153,25 @@ manager therefore only appends, renames, and removes the last entry. Box colours
 are generated from the class id rather than stored, so any number of classes gets
 a readable palette without a per-project colour table.
 
+### Looking at the labels as they actually are
+
+The debug images each step writes are snapshots of what a machine proposed at the
+moment it proposed it. They stay that way: a box moved, deleted or reclassified
+afterwards still appears in them exactly as first drawn. Reading them back as if
+they showed the dataset is how a corrected frame gets corrected twice.
+
+```bash
+uv run python -m src.tools.preview_labels                     # every labelled frame
+uv run python -m src.tools.preview_labels --class koli        # only frames holding that class
+uv run python -m src.tools.preview_labels --empty             # only confirmed-empty frames
+uv run python -m src.tools.preview_labels --keys-file mine.txt
+```
+
+Annotated copies land in `data/previews/`, named for their contents
+(`2-palet_3lu_1-koli_<frame>.jpg`) so a folder of them can be scanned before any
+of it is opened. It renders the label files, so what appears is what is on disk
+right now, corrections included — and it writes nothing but images.
+
 ### Finding examples of a class the dataset barely has
 
 Every dataset has a rare class. Labelling more random frames does not fix it: a
@@ -261,7 +280,14 @@ difference between the classes. So the number keys exist: placing the box is the
 expensive part and the machine has already done it.
 
 `A` accepts and `R` rejects, and both move straight to the next frame, so a
-queue can be worked without returning to the list between images.
+queue can be worked without returning to the list between images. `Ctrl+Z` takes
+the last decision back, as many times as needed: at a keystroke per frame a
+mistaken one is a certainty rather than an edge case. Undoing a rejection
+restores the label file it deleted, which is why the boxes are read before the
+deletion rather than after.
+
+A decision that was taken back is also removed from the pace measurement, since
+it never happened.
 
 The same editor is available outside the queue, through **Edit Labels** in the
 sidebar. Once a frame is accepted it leaves the queue, and until that button
