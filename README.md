@@ -131,6 +131,26 @@ manager therefore only appends, renames, and removes the last entry. Box colours
 are generated from the class id rather than stored, so any number of classes gets
 a readable palette without a per-project colour table.
 
+### Changing the scheme after labelling has started
+
+A class list is not settled at the start of a project. It is settled a few
+hundred frames in, when it becomes clear that one class was really three, that
+two are never told apart, or that a catch-all defined as "everything else" has no
+consistent appearance and no detector will learn it. Discovering that should not
+mean abandoning the labels.
+
+```bash
+uv run python -m src.tools.remap_classes                          # what does each class cost?
+uv run python -m src.tools.remap_classes --merge old new --apply  # move its boxes, then remove it
+uv run python -m src.tools.remap_classes --delete unused --apply  # remove a class nothing uses
+```
+
+Removing a class renumbers every class above it, and the tool rewrites every
+label file in the same breath — which is the part the class editor could not do,
+and why it refused. Deleting a class that still holds boxes is refused rather
+than performed quietly. Nothing is written without `--apply`; run it once to read
+the plan and once to act on it.
+
 Labelling a different domain means editing this file, not the code.
 
 ### How Step 4 locates an object
