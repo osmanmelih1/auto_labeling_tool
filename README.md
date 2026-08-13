@@ -216,6 +216,13 @@ expensive part and the machine has already done it.
 `A` accepts and `R` rejects, and both move straight to the next frame, so a
 queue can be worked without returning to the list between images.
 
+The same editor is available outside the queue, through **Edit Labels** in the
+sidebar. Once a frame is accepted it leaves the queue, and until that button
+existed there was no way to correct it short of deleting its label and starting
+over — which is a strange thing for a labelling tool to be unable to do. It
+matters most when the class scheme changes after labelling has begun: the frames
+holding the class being split are exactly the ones nobody has queued.
+
 Closing the screen reports the **median** seconds per frame and what the rest of
 the queue would cost at that pace. Median rather than mean, because a review
 session is not continuous — the reviewer answers the door, or thinks hard about

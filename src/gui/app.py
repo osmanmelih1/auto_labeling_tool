@@ -1207,6 +1207,139 @@ class ReviewQueueDialog(QDialog):
         print(f"[+] Review session recorded in {SESSION_LOG_PATH}: {json.dumps(record)}")
 
 
+class LabelEditorDialog(QDialog):
+    """Correct the labels of one image, outside the review queue.
+
+    The review screen could already do this, but only for frames a propagation
+    or prediction run had queued. Once a frame is accepted it leaves the queue,
+    and there was then no way to fix it short of deleting its label and starting
+    again — which is a strange thing for a labelling tool to be unable to do.
+
+    A class scheme that changes after labelling has begun makes this concrete:
+    splitting one class into two means revisiting the frames that used the old
+    one, and none of them are in any queue.
+    """
+
+    def __init__(self, image_path: str, label_path: str, parent=None):
+        """Open one image and its label file for editing.
+
+        Args:
+            image_path: Image to display.
+            label_path: YOLO label file to rewrite in place.
+            parent: Optional Qt parent, used to reach the console for logging.
+        """
+        super().__init__(parent)
+        self.setWindowTitle(f"Edit Labels — {os.path.basename(image_path)}")
+        self.resize(1000, 720)
+        self.setStyleSheet("""
+            QDialog { background-color:#1e1e1e; }
+            QLabel { color:white; }
+            QComboBox {
+                background-color:#2b2b2b; color:white;
+                border:1px solid #444; padding:5px; border-radius:4px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        tool_row = QHBoxLayout()
+        caption = QLabel("Selected box:")
+        caption.setStyleSheet("color:#999999; font-size:12px;")
+        tool_row.addWidget(caption)
+
+        self.class_combo = QComboBox()
+        self.class_combo.addItems(load_classes() or ["(no classes defined)"])
+        self.class_combo.setEnabled(False)
+        self.class_combo.currentIndexChanged.connect(lambda i: self.editor.set_selected_class(i))
+        tool_row.addWidget(self.class_combo)
+
+        self.delete_btn = QPushButton("Delete Box")
+        self.delete_btn.setEnabled(False)
+        self.delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.delete_btn.setStyleSheet("""
+            QPushButton {
+                background-color:#3b3b3b; color:#dddddd; border:1px solid #555;
+                padding:5px 12px; border-radius:5px; font-size:12px;
+            }
+            QPushButton:hover { background-color:#5a2b2b; }
+            QPushButton:disabled { color:#666666; border-color:#3a3a3a; }
+        """)
+        self.delete_btn.clicked.connect(lambda: self.editor.delete_selected())
+        tool_row.addWidget(self.delete_btn)
+        tool_row.addStretch()
+
+        hint = QLabel("keys: 1-9 class · Del remove · drag to move or resize · drag empty space to add")
+        hint.setStyleSheet("color:#777777; font-size:11px;")
+        tool_row.addWidget(hint)
+        layout.addLayout(tool_row)
+
+        self.editor = LabelEditorView()
+        self.editor.selection_changed.connect(self._on_selection)
+        self.editor.status_message.connect(self._log)
+        layout.addWidget(self.editor, stretch=1)
+
+        self.status_label = QLabel()
+        self.status_label.setStyleSheet("""
+            color:#cccccc; font-size:12px; background-color:#252526;
+            border-radius:6px; padding:8px;
+        """)
+        layout.addWidget(self.status_label)
+
+        if self.editor.load(image_path, label_path):
+            self.editor.setFocus()
+            self._refresh_status()
+        else:
+            self.status_label.setText(f"⚠ Could not open {image_path}")
+
+        # Every edit is written to the label file as it happens, so there is no
+        # save button to forget and nothing a close can lose.
+        self.editor.boxes_changed.connect(self._refresh_status)
+
+    def _refresh_status(self):
+        """Restate what the label file now holds, per class."""
+        names = load_classes()
+        counts: dict[int, int] = {}
+        for box in self.editor.boxes:
+            counts[box["class_id"]] = counts.get(box["class_id"], 0) + 1
+
+        if not counts:
+            self.status_label.setText("No boxes. This frame will be exported as a confirmed-empty image.")
+            return
+
+        summary = "  ".join(f"{class_name(names, cid)} ×{n}" for cid, n in sorted(counts.items()))
+        self.status_label.setText(f"Saved: {summary}")
+
+    def _on_selection(self, index: int):
+        """Point the class dropdown and the delete button at the selected box.
+
+        Args:
+            index: Index of the selected box, or -1 when none is selected.
+        """
+        selected = index >= 0
+        self.delete_btn.setEnabled(selected)
+        self.class_combo.setEnabled(selected)
+        if not selected:
+            return
+
+        self.class_combo.blockSignals(True)
+        self.class_combo.setCurrentIndex(
+            min(self.editor.selected_class_id() or 0, self.class_combo.count() - 1)
+        )
+        self.class_combo.blockSignals(False)
+
+    def _log(self, message: str):
+        """Forward a message to the main window's console, if there is one.
+
+        Args:
+            message: Text to append, without a trailing newline.
+        """
+        parent = self.parent()
+        if parent and hasattr(parent, "append_log"):
+            parent.append_log(message + "\n")
+
+
 class ClassManagerDialog(QDialog):
     """Editor for the project's object classes.
 
@@ -1508,6 +1641,11 @@ class AutoLabelingApp(QMainWindow):
         self.prompt_input.setPlaceholderText("Enter prompt (e.g., pallet)")
         sidebar_layout.addWidget(self.prompt_input)
 
+        self.btn_edit = QPushButton("Edit Labels")
+        self.btn_edit.setObjectName("editBtn")
+        self.btn_edit.clicked.connect(self.open_label_editor)
+        sidebar_layout.addWidget(self.btn_edit)
+
         self.btn_load = QPushButton("Load Image")
         self.btn_load.setObjectName("loadBtn")
         self.btn_load.clicked.connect(self.open_image_dialog)
@@ -1609,6 +1747,38 @@ class AutoLabelingApp(QMainWindow):
             self.append_log("[*] TIP: scroll to zoom, right-drag to pan, Backspace to undo a box.\n")
             self.load_existing_boxes()
             self.canvas.setFocus()
+
+    def open_label_editor(self):
+        """Open a labelled image in the editor, whether or not it is queued.
+
+        Asks for the image rather than using whatever is on the seeding canvas,
+        because the frames that need correcting are usually a list someone worked
+        out elsewhere — the ones holding a class that is being split, say.
+        """
+        default_dir = os.path.abspath("data/deduplicated")
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select an image to edit", default_dir, "Images (*.png *.jpg *.jpeg)"
+        )
+        if not file_path:
+            return
+
+        stem = os.path.splitext(os.path.basename(file_path))[0]
+        label_path = os.path.join("data/labels", f"{stem}.txt")
+        if not os.path.exists(label_path):
+            QMessageBox.information(
+                self,
+                "No labels yet",
+                f"{stem} has no label file.\n\nDraw a box on the canvas and run Step 3b to create one.",
+            )
+            return
+
+        self.append_log(f"\n[*] Editing labels for {stem}\n")
+        LabelEditorDialog(file_path, label_path, parent=self).exec()
+
+        # The canvas may be showing this same frame with the boxes as they were.
+        if self.current_image_path == file_path:
+            self.canvas.load_image(file_path)
+            self.load_existing_boxes()
 
     def load_existing_boxes(self):
         """Show the boxes already labelled on this image and adopt them for editing.
