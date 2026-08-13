@@ -268,6 +268,26 @@ def test_dragging_on_empty_background_adds_a_box(editor):
     assert len(read_yolo_boxes(label_path)) == 3
 
 
+def test_clicking_a_box_to_select_it_is_not_an_edit(editor):
+    """Selection must not rewrite the label or discard the machine's confidence.
+
+    It did, and the cost was invisible: every selection rewrote the file, wiped
+    the score of a box nobody had touched, and filled the console with edits that
+    never happened, which made the log useless as a record of the work.
+    """
+    view, label_path = editor
+    before = read_yolo_boxes(label_path)
+    score_before = view.boxes[0]["score"]
+    centre = view.boxes[0]["item"].rect().center()
+
+    press(view, centre)
+    release(view, centre)
+
+    assert view.selected_index == 0
+    assert read_yolo_boxes(label_path) == before
+    assert view.boxes[0]["score"] == score_before
+
+
 def test_a_stray_click_creates_nothing(editor):
     """A click that is not a drag is a misclick, not a label."""
     view, label_path = editor

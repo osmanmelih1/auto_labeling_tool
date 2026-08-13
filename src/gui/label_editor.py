@@ -227,6 +227,7 @@ class LabelEditorView(QGraphicsView):
         self._origin_rect = QRectF()
         self._draft_item = None
         self._pan_start = None
+        self._moved = False
 
     # ------------------------------------------------------------------ load
 
@@ -581,6 +582,7 @@ class LabelEditorView(QGraphicsView):
             return
 
         pos = self.mapToScene(event.pos())
+        self._moved = False
 
         handle = self._handle_at(pos)
         if handle is not None:
@@ -664,10 +666,11 @@ class LabelEditorView(QGraphicsView):
             index: Box to move.
             rect: New rectangle in image pixel coordinates.
         """
-        if index < 0:
+        if index < 0 or self.boxes[index]["item"].rect() == rect:
             return
         self.boxes[index]["item"].setRect(rect)
         self.boxes[index]["tag"].setPos(rect.left(), rect.top())
+        self._moved = True
         self.viewport().update()
 
     def mouseReleaseEvent(self, event):
@@ -684,6 +687,13 @@ class LabelEditorView(QGraphicsView):
             return
 
         if mode in ("resize", "move"):
+            if not self._moved:
+                # Clicking a box to select it is not an edit. Treating it as one
+                # rewrote the label file on every selection, discarded the
+                # confidence propagation had recorded for a box nobody touched,
+                # and buried the real edits in a console full of "Box adjusted".
+                return
+
             # A hand-placed box is no longer described by the confidence the
             # machine had in the box it placed.
             if self.selected_index >= 0:
