@@ -53,10 +53,28 @@ def test_a_downloaded_checkpoint_is_moved_out_of_the_root(project_sandbox):
     """
     (project_sandbox / "yolov8n.pt").write_bytes(b"weights")
 
-    YoloTrainer().tidy_base_model()
+    YoloTrainer().tidy_downloaded_checkpoints()
 
     assert not (project_sandbox / "yolov8n.pt").exists()
     assert (project_sandbox / "data" / "models" / "yolov8n.pt").read_bytes() == b"weights"
+
+
+def test_the_amp_check_download_is_filed_away_too(project_sandbox):
+    """Ultralytics downloads a second, unrelated model to verify mixed precision.
+
+    Only the base model was handled at first, which is why a stray yolo26n.pt
+    kept reappearing at the project root after every training run.
+
+    Args:
+        project_sandbox: The sandboxed project root.
+    """
+    (project_sandbox / "yolov8n.pt").write_bytes(b"base")
+    (project_sandbox / "yolo26n.pt").write_bytes(b"amp check")
+
+    YoloTrainer().tidy_downloaded_checkpoints()
+
+    assert list(project_sandbox.glob("*.pt")) == []
+    assert (project_sandbox / "data" / "models" / "yolo26n.pt").read_bytes() == b"amp check"
 
 
 def test_a_second_run_reuses_the_local_copy(project_sandbox):
@@ -95,6 +113,7 @@ def test_tidying_never_overwrites_the_stored_checkpoint(project_sandbox):
     (models / "yolov8n.pt").write_bytes(b"stored")
     (project_sandbox / "yolov8n.pt").write_bytes(b"different")
 
-    YoloTrainer().tidy_base_model()
+    YoloTrainer().tidy_downloaded_checkpoints()
 
     assert (models / "yolov8n.pt").read_bytes() == b"stored"
+    assert not (project_sandbox / "yolov8n.pt").exists()

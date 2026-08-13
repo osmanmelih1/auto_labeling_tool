@@ -269,10 +269,11 @@ Hugging Face and accept the DINOv3 license first.
 **Grounding DINO** (`IDEA-Research/grounding-dino-base`) is fetched automatically by
 `transformers` on first run of Step 3a and cached in the Hugging Face cache directory.
 
-**YOLOv8n** (`yolov8n.pt`) is downloaded by Ultralytics on the first training run.
-Ultralytics puts a missing checkpoint in the current working directory rather than
-where it was asked to, so Step 7 moves it into `data/models/` afterwards and reuses
-it from there. Nothing is left at the project root.
+**YOLOv8n** (`yolov8n.pt`) is downloaded by Ultralytics on the first training run,
+along with a second, unrelated checkpoint its mixed-precision check uses. Both land
+in the current working directory whatever path they were asked for, so Step 7 files
+every checkpoint it finds at the root into `data/models/` when training ends.
+Nothing is left beside `main.py`.
 
 ### Where things live
 

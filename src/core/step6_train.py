@@ -188,19 +188,35 @@ class YoloTrainer:
         print(f"[*] {target} not found. Ultralytics will download {target.name} and it will be kept there.")
         return target.name
 
-    def tidy_base_model(self) -> None:
-        """Move a freshly downloaded checkpoint out of the project root.
+    def tidy_downloaded_checkpoints(self) -> None:
+        """File away every checkpoint Ultralytics left in the working directory.
 
-        Called after training, because the download only happens once Ultralytics
-        loads the model. Without this the file stays at the root and the next run
-        would download it again into the same place.
+        Two arrive uninvited, and only the first was anticipated. The base model,
+        when it was not already on disk. And a second, unrelated model that the
+        automatic mixed precision check downloads to confirm the GPU gives the
+        same answer with AMP on as with it off — which is where the stray
+        yolo26n.pt at the project root came from, twice, after the first attempt
+        at this only handled the base model.
+
+        Both land in the current working directory regardless of the path they
+        were asked for, both are checkpoints, and every other weight in this
+        project lives in data/models.
         """
-        target = Path(self.base_model)
-        stray = Path(target.name)
-        if stray.exists() and not target.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
+        store = Path(self.base_model).parent
+        store.mkdir(parents=True, exist_ok=True)
+
+        for stray in sorted(Path().glob("*.pt")):
+            target = store / stray.name
+            if target.exists():
+                # A duplicate of a checkpoint already filed away. Keeping the
+                # stored one and dropping this is the only outcome that leaves
+                # the root clean without overwriting something in use.
+                stray.unlink()
+                print(f"[*] Discarded a duplicate {stray.name} from the project root.")
+                continue
+
             shutil.move(str(stray), str(target))
-            print(f"[+] Stored {target.name} in {target.parent} for the next run.")
+            print(f"[+] Filed {stray.name} into {store}.")
 
     def report_device(self) -> None:
         """Print which device will be used and how much memory it has."""
@@ -242,7 +258,7 @@ class YoloTrainer:
             plots=True,
         )
 
-        self.tidy_base_model()
+        self.tidy_downloaded_checkpoints()
         self.report_results(results)
 
     def report_results(self, results) -> None:
