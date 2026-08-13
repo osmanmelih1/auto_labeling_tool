@@ -28,3 +28,18 @@ REVIEW_THRESHOLD = 0.78
 # to the frame's own peak would instead define "hot" in terms of the single
 # strongest match, hiding every dimmer instance of the same object.
 DETECTION_LEVEL = REVIEW_THRESHOLD
+
+# --- Detector confidence -----------------------------------------------------
+#
+# A trained detector reports a calibrated probability, which is a different
+# quantity from a cosine similarity between feature vectors and must not share
+# its numbers. Two patches of the same material sit around 0.85 similar while
+# meaning nothing in particular; a detector at 0.85 is stating it has seen this
+# object before.
+#
+# These are starting values, not measured ones. A detector trained on a hundred
+# images is confident about the class it saw most and unreliable everywhere else,
+# so the review band is wide on purpose: the frames worth a human's attention are
+# the ones the model is unsure about, and a narrow band hides them.
+DETECTOR_AUTO_ACCEPT = 0.80
+DETECTOR_REVIEW = 0.30

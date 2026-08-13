@@ -42,6 +42,26 @@ data/raw/ ──[1]──> data/deduplicated/ ──[2]──> data/embeddings/e
 | 5 | `src/gui/app.py` (Review Queue) | Human-in-the-loop accept / reject for borderline matches. |
 | 6 | `src/core/step5_export.py` | Packages the labels into a YOLO dataset and writes `data.yaml`. |
 | 7 | `src/core/step6_train.py` | Fine-tunes a YOLO detector on the exported dataset. |
+| 8 | `src/core/step7_predict.py` | Pre-labels the remaining images with that detector and queues only what it is unsure about. |
+
+### The loop closes at step 8
+
+Steps 4 and 8 are two ways to fill the same review queue, and the numbering is a
+list where the pipeline is a loop. Step 4 is the cold start: no model exists, so
+a handful of hand-drawn seeds are spread by feature similarity. Step 8 takes over
+once there is a detector, because a detector is the better proposer for anything
+it has actually seen — a calibrated confidence instead of a cosine distance,
+classes separated by extent rather than texture, and milliseconds per image
+rather than seconds.
+
+Neither replaces the other. A class the detector has barely been trained on is
+still better served by propagation, and propagation is the only option on a new
+project.
+
+Work the queue **least-confident first** after step 8. A frame the detector
+scores at 0.95 teaches nobody anything; the ones it found difficult are where a
+correction changes the next model. The sort control has `Score: Low → High` for
+this.
 
 ### Training measures the labels, not just the model
 
@@ -324,6 +344,9 @@ uv run python -m src.core.step4_propagation
 6. **5. Review Queue** — correct the borderline results, then accept or reject.
 7. **6. Export Dataset** — build `datasets/` and `data.yaml`, ready for training.
 8. **7. Train YOLO** — fine-tune a detector and report validation metrics.
+9. **8. Pre-label with YOLO** — add more raw images, then let the detector propose
+   the labels and go back to step 6. Each turn of this loop leaves fewer frames
+   for a human.
 
 Define your classes with **Manage Classes** before drawing the first box; the
 canvas and the exporter both read them from `data/classes.json`.

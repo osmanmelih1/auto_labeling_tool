@@ -1553,6 +1553,14 @@ class AutoLabelingApp(QMainWindow):
         sidebar_layout.addWidget(self.btn_train)
         self.buttons.append(self.btn_train)
 
+        # Numbered last because it needs a trained model, but it feeds the review
+        # queue exactly like step 4 does. The pipeline is a loop, not a list.
+        self.btn_predict = QPushButton("8. Pre-label with YOLO")
+        self.btn_predict.setObjectName("predictBtn")
+        self.btn_predict.clicked.connect(lambda: self.run_script("src.core.step7_predict"))
+        sidebar_layout.addWidget(self.btn_predict)
+        self.buttons.append(self.btn_predict)
+
         sidebar_layout.addStretch()
 
         splitter = QSplitter(Qt.Orientation.Vertical)
