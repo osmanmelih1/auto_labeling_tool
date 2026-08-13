@@ -8,6 +8,7 @@ old class are exactly the ones nobody has queued.
 """
 
 import pytest
+from PyQt6.QtCore import QRectF
 from PyQt6.QtGui import QImage
 
 from src.core.yolo_format import read_yolo_boxes, write_yolo_boxes
@@ -125,6 +126,48 @@ def test_the_status_line_reports_what_was_saved(qapp, frame):
 
     assert "pallet_2" in dialog.status_label.text()
     assert "irregular" in dialog.status_label.text()
+
+
+def test_a_frame_with_no_labels_opens_empty_rather_than_being_refused(qapp, project_sandbox):
+    """Drawing the first box on a fresh frame is labelling, not correcting.
+
+    Refusing it meant the only way to label a new frame was the seeding step,
+    which loads SAM in a subprocess — fine for a box that wants tightening,
+    slow for thirty frames where the hand is enough.
+
+    Args:
+        qapp: The shared QApplication.
+        project_sandbox: The sandboxed project root.
+    """
+    image_path = project_sandbox / "fresh.png"
+    QImage(320, 240, QImage.Format.Format_RGB32).save(str(image_path))
+    label_path = project_sandbox / "fresh.txt"
+
+    dialog = LabelEditorDialog(str(image_path), str(label_path))
+
+    assert dialog.editor.boxes == []
+    assert dialog.editor.image_width == 320
+
+
+def test_the_first_box_drawn_on_a_fresh_frame_is_saved(qapp, project_sandbox):
+    """The label file is created by the first edit, not by opening the frame.
+
+    Args:
+        qapp: The shared QApplication.
+        project_sandbox: The sandboxed project root.
+    """
+    image_path = project_sandbox / "fresh.png"
+    QImage(320, 240, QImage.Format.Format_RGB32).save(str(image_path))
+    label_path = project_sandbox / "fresh.txt"
+    dialog = LabelEditorDialog(str(image_path), str(label_path))
+    assert not label_path.exists()
+
+    dialog.editor.default_class_id = 1
+    index = dialog.editor._add_box(1, QRectF(40, 40, 80, 60), None)
+    dialog.editor.select(index)
+    dialog.editor._commit("[+] Box added.")
+
+    assert read_yolo_boxes(str(label_path)) == [(1, 0.25, pytest.approx(0.29166, abs=1e-4), 0.25, 0.25)]
 
 
 def test_a_missing_image_is_reported_rather_than_crashing(qapp, project_sandbox):

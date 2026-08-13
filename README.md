@@ -197,6 +197,14 @@ instance of another, and that miss is the most interesting result.
 to do with a candidate is a judgement made in the seeding canvas or the label
 editor. A discovery tool that quietly labelled things would be worse than no tool.
 
+**Deduplication is why the rare class is rare.** Searched against `data/raw` on
+this project, every candidate that had survived deduplication was already
+labelled; the genuinely new ones had all been discarded as near-duplicates. That
+is deduplication working as designed — it exists to stop the same thing being
+labelled twice — and working against a rare class, where every instance counts.
+Bringing a candidate back is a copy into `data/deduplicated/`, after which the
+usual pre-label-and-review loop handles it like any other frame.
+
 ### Changing the scheme after labelling has started
 
 A class list is not settled at the start of a project. It is settled a few

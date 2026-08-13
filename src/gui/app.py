@@ -108,14 +108,29 @@ class WorkerThread(QThread):
             # import shared helpers such as src.core.sam_engine. The explicit cwd
             # also guarantees the relative data/... paths every step uses resolve
             # against the project root.
+            # The child is told to write UTF-8 and its output is read as UTF-8.
+            # Without both, Python decodes the pipe with the console's locale
+            # codepage, which on a Turkish or Western European Windows is cp1254
+            # or cp1252 and cannot represent the box-drawing characters
+            # Ultralytics uses for its progress bars. Training then died on its
+            # first progress bar with a UnicodeDecodeError, and only from inside
+            # the GUI: run from a terminal there is no pipe and no decoding.
+            #
+            # errors="replace" so that one unexpected byte from any future
+            # dependency shows as a question mark instead of killing a run that
+            # may already be twenty minutes in.
+            environment = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+
             process = subprocess.Popen(
                 ["uv", "run", "python", "-m", self.module_name],
                 cwd=str(PROJECT_ROOT),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
-                universal_newlines=True,
+                env=environment,
             )
             for line in process.stdout:
                 self.log_signal.emit(line)
@@ -1856,15 +1871,16 @@ class AutoLabelingApp(QMainWindow):
 
         stem = os.path.splitext(os.path.basename(file_path))[0]
         label_path = os.path.join("data/labels", f"{stem}.txt")
-        if not os.path.exists(label_path):
-            QMessageBox.information(
-                self,
-                "No labels yet",
-                f"{stem} has no label file.\n\nDraw a box on the canvas and run Step 3b to create one.",
-            )
-            return
 
-        self.append_log(f"\n[*] Editing labels for {stem}\n")
+        # A frame with no label file opens empty rather than being refused.
+        # Drawing the first box on a fresh frame is labelling, not correcting,
+        # and there is no reason the same canvas should not do both. The seeding
+        # step remains the better route when the box wants SAM to tighten it;
+        # this one is faster when the hand is enough.
+        if not os.path.exists(label_path):
+            self.append_log(f"\n[*] {stem} has no labels yet. Draw the first box.\n")
+        else:
+            self.append_log(f"\n[*] Editing labels for {stem}\n")
         LabelEditorDialog(file_path, label_path, parent=self).exec()
 
         # The canvas may be showing this same frame with the boxes as they were.
