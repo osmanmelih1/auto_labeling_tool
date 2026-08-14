@@ -15,6 +15,13 @@ model is often the one that is wrong, and its disagreement then says the class
 is genuinely hard rather than mislabelled. Either answer is worth knowing, and
 both are cheaper to reach from a shortlist of ten frames than from all of them.
 
+Silence is the weaker half of the tool, and the more dangerous one. The model
+was trained on these labels, so where a mistake was made consistently the model
+has learned it and will agree. On the first run against a dirty class it found
+two of the three errors a human had already spotted by eye and missed the third
+for exactly this reason. A clean audit means "no *new* contradictions", never
+"the labels are right".
+
 A second kind of suspect is reported too: a labelled box the detector sees
 nothing at all in. That is what a junk box looks like from the model's side.
 
