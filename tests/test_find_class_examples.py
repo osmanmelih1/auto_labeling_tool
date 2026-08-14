@@ -272,3 +272,24 @@ def test_a_class_the_detector_never_suspects_says_so(finder, project_sandbox, ca
     assert "never suspects" in out
     assert "Seed some by hand" in out
     assert not (project_sandbox / "data" / "candidates").exists()
+
+
+def test_an_unlabelled_frame_is_answered_quietly(project_sandbox, capsys):
+    """A frame with no label file is what this search exists to find.
+
+    Asked through read_yolo_boxes, the missing file is reported as an error, and
+    a search across three thousand images buries its own results under [-] lines
+    about frames that are perfectly fine.
+
+    Args:
+        project_sandbox: The sandboxed project root.
+        capsys: Captured output.
+    """
+    labels = project_sandbox / "data" / "labels"
+    labels.mkdir(parents=True)
+    finder = ClassExampleFinder.__new__(ClassExampleFinder)
+    finder.label_dir = labels
+    finder.class_id = 0
+
+    assert finder.already_labelled("never_seen") is False
+    assert capsys.readouterr().out == ""
