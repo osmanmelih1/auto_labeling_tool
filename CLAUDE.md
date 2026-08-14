@@ -72,9 +72,16 @@ same review queue, and the review screen does not know which produced a box.
   and on a rare class that is exactly the wrong instinct. Recovering one is a
   copy back into `data/deduplicated/`.
 - **A class that gets worse as it gains data is dirty, not starved.**
-  `duzensiz_istif` fell 0.557 → 0.495 while growing 27 → 31 boxes; roughly a
-  fifth of its labels were wrong. Compare `palet_2li`, which was genuinely
-  starved: 26 → 62 training images took it 0.495 → 0.951.
+  `duzensiz_istif` fell 0.557 → 0.495 while growing 27 → 31 boxes; a fifth of its
+  labels were wrong. Correcting six boxes took it to 0.740 without adding a
+  single new example. Compare `palet_2li`, which was genuinely starved: 26 → 62
+  training images took it 0.495 → 0.951. The two need opposite treatments, and
+  the direction of the score as data grows is what tells them apart.
+- **One wrong label damages two classes.** A neatly stacked single pallet
+  labelled `duzensiz_istif` was teaching the model both that irregular stacks
+  look neat and that `palet_1li` does not exist there. Moving that one box took
+  `palet_1li` from 0.566 to 0.857 on unchanged training data. Look for a
+  mislabel's beneficiary, not just its victim.
 - **`audit_labels` is blind to consistent mistakes.** The model was trained on
   these labels, so a mistake made the same way every time is one the model has
   learned and will agree with. A clean audit means "no new contradictions",
@@ -106,9 +113,17 @@ anything involving encodings or path separators.
 
 ## Current state
 
-834 frames labelled (104 confirmed empty), 766 boxes, six classes. Five training
-rounds; mAP50-95 0.685 → 0.780, review load 68% of frames → 7.4%. Roughly 2000 of
+834 frames labelled (104 confirmed empty), 766 boxes, six classes. Six training
+rounds; mAP50-95 0.685 → 0.856, review load 68% of frames → 7.4%. Roughly 2000 of
 5240 raw images are not yet ingested, but deduplication keeps only about a
 quarter of new frames, so the pool is saturating.
 
-Open: `palet_1li` is starved (11 boxes) and `duzensiz_istif` is being cleaned.
+Every class now clears 0.74 mAP50-95. The weakest is `duzensiz_istif` at 0.740
+with precision 0.484 — it over-fires, and it holds 25 boxes after cleaning.
+
+**Read the per-class table, not the headline.** Several classes are measured on
+three to nine validation instances, so their numbers move on one box. The
+direction across rounds is evidence; the third decimal place is not.
+
+Next: `audit_labels` with no `--class` filter, judged by `runs/train-8`. The
+cleaner model can see contradictions the dirty one agreed with.
