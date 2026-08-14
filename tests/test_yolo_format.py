@@ -85,3 +85,38 @@ def test_iou_of_half_overlapping_boxes():
     a = (0.25, 0.5, 0.5, 0.5)
     b = (0.50, 0.5, 0.5, 0.5)
     assert abs(iou(a, b) - 1 / 3) < 1e-9
+
+
+def test_a_frame_with_no_label_file_reads_as_no_boxes_and_says_nothing(tmp_path, capsys):
+    """An unlabelled frame is the ordinary state here, not a failure.
+
+    Every frame starts without a label file, and most callers are asking exactly
+    whether one exists yet. Reported as an error, it made the GUI and the class
+    search print a [-] line per healthy frame and bury their real output.
+
+    Args:
+        tmp_path: Pytest's temporary directory.
+        capsys: Captured output.
+    """
+    assert read_yolo_boxes(str(tmp_path / "never_labelled.txt")) == []
+    assert capsys.readouterr().out == ""
+
+
+def test_a_file_that_cannot_be_read_is_still_reported(tmp_path, capsys, monkeypatch):
+    """Silence is only right for absence; a real read failure must be visible.
+
+    Args:
+        tmp_path: Pytest's temporary directory.
+        capsys: Captured output.
+        monkeypatch: Used to make opening the file fail.
+    """
+    path = tmp_path / "unreadable.txt"
+    path.write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr("builtins.open", refuse)
+
+    assert read_yolo_boxes(str(path)) == []
+    assert "[-] Could not read" in capsys.readouterr().out

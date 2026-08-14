@@ -33,6 +33,13 @@ def read_yolo_boxes(label_path: str) -> list[tuple[int, float, float, float, flo
     try:
         with open(label_path) as f:
             lines = f.readlines()
+    except FileNotFoundError:
+        # An unlabelled frame is the ordinary state in this pipeline, not a
+        # failure: every frame starts without a label file and most callers are
+        # asking precisely whether one exists yet. Reporting it as an error made
+        # the GUI and the class search each print a [-] line per healthy frame,
+        # which buried their real output.
+        return boxes
     except OSError as e:
         print(f"[-] Could not read {label_path}: {e}")
         return boxes

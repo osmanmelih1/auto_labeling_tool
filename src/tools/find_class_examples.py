@@ -111,15 +111,7 @@ class ClassExampleFinder:
         Returns:
             bool: True when its label file already holds a box of this class.
         """
-        # An unlabelled frame is the answer this search is looking for, not a
-        # failure, so the file's absence is checked before reading it. Asked
-        # directly, read_yolo_boxes reports the missing file as an error and the
-        # useful part of the output drowns in [-] lines about frames that are
-        # fine.
         path = self.label_dir / f"{stem}.txt"
-        if not path.exists():
-            return False
-
         return any(class_id == self.class_id for class_id, *_ in read_yolo_boxes(str(path)))
 
     def search(self, paths: list[Path]) -> list[tuple[Path, float, list]]:
