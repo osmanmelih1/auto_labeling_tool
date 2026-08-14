@@ -15,6 +15,15 @@ model is often the one that is wrong, and its disagreement then says the class
 is genuinely hard rather than mislabelled. Either answer is worth knowing, and
 both are cheaper to reach from a shortlist of ten frames than from all of them.
 
+How far to trust a disagreement depends on how much the class taught the model,
+so each suspect is printed with the number of boxes its class holds. Against
+``duzensiz_istif`` at 31 boxes the tool was mostly right. Against ``palet_1li``
+at 11 it was wrong three times out of four: with eight training images the model
+cannot recognise a neat single pallet, so it called them irregular. Both classes
+produced disagreements that all pointed the same way, and that pattern does not
+tell the two apart — dirty labels and an under-taught class look identical from
+here. Only opening the frames settles it.
+
 Silence is the weaker half of the tool, and the more dangerous one. The model
 was trained on these labels, so where a mistake was made consistently the model
 has learned it and will agree. On the first run against a dirty class it found
@@ -39,7 +48,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from src.core.class_config import load_classes
-from src.core.yolo_format import iou, read_yolo_boxes, yolo_box_to_pixels
+from src.core.yolo_format import count_boxes_per_class, iou, read_yolo_boxes, yolo_box_to_pixels
 
 IMAGE_DIR = "data/deduplicated"
 LABEL_DIR = "data/labels"
@@ -59,6 +68,12 @@ SEARCH_CONFIDENCE = 0.05
 # Only a confident disagreement is worth a human's attention. A model that is
 # unsure is not evidence of anything.
 DISAGREE_CONFIDENCE = 0.50
+
+# Below this many boxes a class has probably not taught the model enough for its
+# opinion to outweigh the label's. The number is not a threshold the tool acts
+# on — it only decides which suspects are printed with a warning, because the
+# reader is the one who has to weigh them.
+THINLY_TAUGHT = 40
 
 
 def predict_boxes(model, image_path: Path) -> list[tuple[int, float, tuple]]:
@@ -153,6 +168,36 @@ def save_preview(
     image.save(output_dir / stem, quality=88)
 
 
+def report_suspects(
+    suspects: list[tuple], names: list[str], counts: dict[int, int], thinly_taught: int = THINLY_TAUGHT
+) -> None:
+    """Print the shortlist, loudest disagreement first.
+
+    Each row carries the number of boxes its class holds, because that is what
+    decides whether the model's opinion is worth more than the label's.
+
+    Args:
+        suspects: ``(verdict, key, filename, class_id, proposed, confidence)`` tuples.
+        names: Class names in id order.
+        counts: Box count keyed by class id.
+        thinly_taught: Box count below which a class is marked as barely taught.
+    """
+    print(f"    {'verdict':<10} {'labelled':<16} {'model says':<16} {'conf':>5} {'seen':>6}  frame")
+    for verdict, key, _, class_id, proposed, confidence in suspects:
+        says = "nothing here" if proposed is None else names[proposed]
+        held = counts.get(class_id, 0)
+        seen = f"{held}!" if held < thinly_taught else str(held)
+        print(f"    {verdict:<10} {names[class_id]:<16} {says:<16} {confidence:>5.2f} {seen:>6}  {key}")
+
+    thin = sorted({names[s[3]] for s in suspects if counts.get(s[3], 0) < thinly_taught})
+    if thin:
+        print(
+            f"\n[!] Marked with '!': {', '.join(thin)} hold fewer than {thinly_taught} boxes."
+            "\n    The model has barely been taught them, so it is the more likely one to be"
+            "\n    wrong here. Judge these by eye before changing anything."
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Shortlist the labels a trained detector contradicts.
 
@@ -244,10 +289,7 @@ def main(argv: list[str] | None = None) -> int:
     # available to a ranking of how likely the label is to be wrong.
     suspects.sort(key=lambda s: (s[0] != "disagrees", -s[5]))
 
-    print(f"    {'verdict':<10} {'labelled':<16} {'model says':<16} {'conf':>5}  frame")
-    for verdict, key, _, class_id, proposed, confidence in suspects:
-        says = "nothing here" if proposed is None else names[proposed]
-        print(f"    {verdict:<10} {names[class_id]:<16} {says:<16} {confidence:>5.2f}  {key}")
+    report_suspects(suspects, names, count_boxes_per_class(args.labels))
 
     disagreements = sum(1 for s in suspects if s[0] == "disagrees")
     print(f"\n[+] {disagreements} confident disagreement(s), {len(suspects) - disagreements} unseen box(es).")

@@ -86,6 +86,16 @@ same review queue, and the review screen does not know which produced a box.
   these labels, so a mistake made the same way every time is one the model has
   learned and will agree with. A clean audit means "no new contradictions",
   never "the labels are right".
+- **Trust the audit in proportion to what the class taught the model.** It was
+  mostly right about `duzensiz_istif` at 31 boxes and wrong three times in four
+  about `palet_1li` at 11 — with eight training images it cannot recognise a
+  neat single pallet, so it called them irregular. Both classes produced
+  disagreements that all pointed one way, and that pattern does not separate
+  dirty labels from an under-taught class. Only opening the frames does.
+- **Dispute rate tracks class size, not class quality.** Across 766 boxes:
+  `palet_3lu` 0.5%, `koli` 2%, `palet_2li` 2.6%, `duzensiz_istif` 7%,
+  `palet_1li` 36%. Read that as a map of what the model knows, not of where the
+  errors are.
 - **Classes may sit on different axes and that is fine.** `palet_1li/2li/3lu`
   count rows; `duzensiz_istif` is what an irregular or incomplete stack is called
   when the rows cannot be counted. A different axis is not a broken one.

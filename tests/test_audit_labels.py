@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from src.tools.audit_labels import judge, main
+from src.tools.audit_labels import judge, main, report_suspects
 
 BOX = (0.5, 0.5, 0.2, 0.2)
 
@@ -96,3 +96,38 @@ def test_a_missing_detector_is_reported_rather_than_crashing(project_sandbox, ca
     """
     assert main([]) == 1
     assert "No trained detector" in capsys.readouterr().out
+
+
+def test_a_thinly_taught_class_is_marked_in_the_report(capsys):
+    """The tool was wrong three times in four against an eleven-box class.
+
+    Every row carries its class's box count, because that is what decides
+    whether the model's opinion outweighs the label's. Without it the reader
+    treats a verdict on eleven examples like a verdict on five hundred.
+
+    Args:
+        capsys: Captured output.
+    """
+    suspects = [("disagrees", "frame_a", "frame_a.jpg", 0, 1, 0.9)]
+
+    report_suspects(suspects, ["rare", "common"], {0: 11, 1: 586}, thinly_taught=40)
+
+    out = capsys.readouterr().out
+    assert "11!" in out
+    assert "rare" in out
+    assert "fewer than 40 boxes" in out
+
+
+def test_a_well_taught_class_is_reported_without_the_warning(capsys):
+    """The caveat has to stay rare, or it becomes noise that is read past.
+
+    Args:
+        capsys: Captured output.
+    """
+    suspects = [("disagrees", "frame_b", "frame_b.jpg", 1, 0, 0.9)]
+
+    report_suspects(suspects, ["rare", "common"], {0: 11, 1: 586}, thinly_taught=40)
+
+    out = capsys.readouterr().out
+    assert "586" in out
+    assert "fewer than" not in out
