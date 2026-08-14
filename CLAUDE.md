@@ -56,7 +56,33 @@ Each step leaves files where the next one looks for them; none imports another.
 `src/tools/` holds things that inspect rather than produce: `audit_labels`,
 `preview_labels`, `find_class_examples`, `remap_classes`, `calibrate_thresholds`,
 `gpu_check`. **None of them writes to `data/labels/`** — proposing is not
-labelling, and a tool that quietly relabelled would be worse than no tool.
+labelling, and a tool that quietly relabelled would be worse than no tool. The
+exception is `new_project`, which deletes rather than proposes and therefore
+does nothing without `--apply`.
+
+## Starting another project
+
+Nothing in the source is tied to a dataset — classes live in
+`data/classes.json` and are edited from the GUI, colours are generated for any
+number of classes, every path resolves under `data/`. What ties the tool to a
+project is that directory's contents, so:
+
+```
+uv run python -m src.tools.new_project            # report
+uv run python -m src.tools.new_project --apply    # clear
+```
+
+It keeps `data/models/` (DINOv3, SAM, the YOLO seed — ~700 MB that belongs to no
+project) and takes everything else, including `runs/`. **Copy out the trained
+checkpoint first**; it is the point of the whole exercise and is gitignored.
+`--keep-classes` reuses the class scheme for a second dataset of the same
+objects.
+
+Skipping this does not raise, it corrupts quietly: step 1 adds to
+`data/deduplicated/` rather than replacing it, so old frames export alongside
+new ones, and step 7 takes the newest checkpoint under `runs/` — which means the
+last project's detector confidently pre-labels this one with the last project's
+classes.
 
 Step 4 is the cold start; step 7 replaces it once a model exists. Both feed the
 same review queue, and the review screen does not know which produced a box.
