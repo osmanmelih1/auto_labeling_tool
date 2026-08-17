@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QTextEdit,
     QVBoxLayout,
@@ -61,6 +62,7 @@ from src.core.class_config import (  # noqa: E402
     load_classes,
     save_class_records,
 )
+from src.core.dataset_summary import summarise  # noqa: E402
 from src.core.review_queue import (  # noqa: E402
     SESSION_LOG_PATH,
     accept,
@@ -71,7 +73,11 @@ from src.core.review_queue import (  # noqa: E402
     reject,
     save_queue,
 )
-from src.core.tiers import AUTO_ACCEPT_THRESHOLD, REVIEW_THRESHOLD  # noqa: E402
+from src.core.tiers import (  # noqa: E402
+    AUTO_ACCEPT_THRESHOLD,
+    MIN_EXAMPLES_TO_TRUST,
+    REVIEW_THRESHOLD,
+)
 from src.core.yolo_format import (  # noqa: E402
     read_yolo_boxes,
     write_yolo_boxes,
@@ -1665,6 +1671,177 @@ class ClassManagerDialog(QDialog):
         self.accept()
 
 
+class DatasetPanel(QFrame):
+    """A standing count of what the dataset holds, per class.
+
+    Every step reports what it just did and none of them says where that leaves
+    the dataset, so the number that decides the next move — which class is thin,
+    which has enough examples for the detector to auto-accept it — used to be
+    recovered from an export log or by counting files. It belongs on screen.
+
+    The bar under each name is the class's share of all boxes. Imbalance is
+    invisible in a column of counts and is the failure mode this project has
+    actually hit, so it is drawn rather than left to be worked out.
+    """
+
+    def __init__(self, parent=None):
+        """Build an empty panel; call refresh() to fill it.
+
+        Args:
+            parent: Parent widget.
+        """
+        super().__init__(parent)
+        self.row_widgets: list[QWidget] = []
+        self.setObjectName("datasetPanel")
+        # Maximum, not Preferred: the panel takes the height its contents need and
+        # gives the rest back to the pipeline above it. Left to expand it absorbed
+        # every spare pixel in the sidebar and pushed the step buttons off screen.
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self.setStyleSheet("""
+            QFrame#datasetPanel { background-color: #232323; border: 1px solid #383838;
+                                  border-radius: 6px; margin: 0px 8px 8px 8px; }
+            QLabel { font-size: 11px; font-weight: normal; }
+            QScrollArea { background: transparent; border: none; }
+            QScrollBar:vertical { background: transparent; width: 6px; }
+            QScrollBar::handle:vertical { background: #4a4a4a; border-radius: 3px; min-height: 20px; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 10)
+        layout.setSpacing(4)
+
+        title = QLabel("DATASET")
+        title.setStyleSheet("color:#8a8a8a; font-size:10px; font-weight:bold; letter-spacing:1px;")
+        layout.addWidget(title)
+
+        self.totals_label = QLabel("")
+        self.totals_label.setWordWrap(True)
+        self.totals_label.setStyleSheet("color:#d0d0d0; font-size:11px;")
+        layout.addWidget(self.totals_label)
+
+        # The rows are rebuilt from scratch on every refresh rather than updated
+        # in place, because the class list itself can change while the window is
+        # open and a stale row is worse than a redrawn one.
+        self.rows_container = QWidget()
+        self.rows_layout = QVBoxLayout(self.rows_container)
+        self.rows_layout.setContentsMargins(0, 4, 0, 0)
+        self.rows_layout.setSpacing(6)
+
+        # The rows scroll rather than growing the panel. A project may define far
+        # more classes than this one does, and a panel that grows to fit them
+        # would push the pipeline buttons out of the window — which is the exact
+        # complaint this panel was added into.
+        rows_scroll = QScrollArea()
+        rows_scroll.setWidgetResizable(True)
+        rows_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        rows_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        rows_scroll.setMaximumHeight(200)
+        rows_scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        rows_scroll.setWidget(self.rows_container)
+        layout.addWidget(rows_scroll)
+
+        self.refresh()
+
+    def refresh(self) -> None:
+        """Recount the labels on disk and redraw the panel."""
+        summary = summarise()
+
+        labelled = summary.frames - summary.empty
+        frames = "frame" if labelled == 1 else "frames"
+        boxes = "box" if summary.boxes == 1 else "boxes"
+        self.totals_label.setText(
+            f"{summary.boxes} {boxes} in {labelled} {frames}\n{summary.empty} confirmed empty"
+        )
+
+        while self.rows_layout.count():
+            item = self.rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self.row_widgets = []
+
+        if not summary.classes:
+            hint = QLabel("No classes yet.")
+            hint.setStyleSheet("color:#8a8a8a; font-size:11px;")
+            self.rows_layout.addWidget(hint)
+            self.row_widgets.append(hint)
+        else:
+            for row in summary.classes:
+                widget = self._build_row(row)
+                self.rows_layout.addWidget(widget)
+                self.row_widgets.append(widget)
+
+        # Without this the rows share any spare height between them and a project
+        # with two classes draws two very tall rows.
+        self.rows_layout.addStretch()
+
+    def _build_row(self, row) -> QWidget:
+        """Draw one class: its name, its box count and its share of the dataset.
+
+        Args:
+            row: A ClassRow from the dataset summary.
+
+        Returns:
+            QWidget: The assembled row.
+        """
+        widget = QWidget()
+        box = QVBoxLayout(widget)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(2)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(4)
+
+        colour = class_qcolor(row.class_id).name()
+
+        name = QLabel(row.name)
+        name.setStyleSheet(f"color:{colour}; font-size:11px;")
+        header.addWidget(name)
+        header.addStretch()
+
+        # An untrusted class is not a warning about the labels, it is a statement
+        # about what pre-labelling is allowed to do with them, so it is marked
+        # rather than coloured like an error.
+        count = QLabel(f"{row.boxes}" if row.trusted else f"{row.boxes} !")
+        count.setStyleSheet(
+            f"color:{'#c8c8c8' if row.trusted else '#e0a458'}; font-size:11px; font-weight:bold;"
+        )
+        count.setToolTip(
+            f"{row.boxes} boxes, {row.share:.0%} of the dataset.\n"
+            + (
+                "Pre-labelling may auto-accept this class."
+                if row.trusted
+                else f"Fewer than {MIN_EXAMPLES_TO_TRUST} boxes, so pre-labelling sends every "
+                "detection of this class to review instead of accepting it."
+            )
+        )
+        header.addWidget(count)
+        box.addLayout(header)
+
+        # The share is drawn by giving two frames proportional stretch, so the bar
+        # stays correct at any sidebar width without any pixel arithmetic.
+        bar = QHBoxLayout()
+        bar.setContentsMargins(0, 0, 0, 0)
+        bar.setSpacing(0)
+
+        filled = QFrame()
+        filled.setFixedHeight(3)
+        filled.setStyleSheet(f"background-color:{colour}; border:none; border-radius:1px;")
+        rest = QFrame()
+        rest.setFixedHeight(3)
+        rest.setStyleSheet("background-color:#3a3a3a; border:none; border-radius:1px;")
+
+        bar.addWidget(filled, max(int(row.share * 1000), 1 if row.boxes else 0))
+        bar.addWidget(rest, max(int((1 - row.share) * 1000), 0))
+        box.addLayout(bar)
+
+        return widget
+
+
 class AutoLabelingApp(QMainWindow):
     """Main window: pipeline controls, annotation canvas and console output."""
 
@@ -1688,13 +1865,28 @@ class AutoLabelingApp(QMainWindow):
         main_layout.setSpacing(0)
 
         sidebar_frame = QFrame()
-        sidebar_frame.setFixedWidth(220)
+        sidebar_frame.setObjectName("sidebar")
+        sidebar_frame.setFixedWidth(250)
+        # The background and border are scoped to #sidebar rather than left on
+        # QFrame, because the scroll area and the dataset panel are QFrames too
+        # and would otherwise each draw their own right-hand border.
         sidebar_frame.setStyleSheet("""
-            QFrame { background-color: #2b2b2b; border-right: 1px solid #1e1e1e; }
+            QFrame#sidebar { background-color: #2b2b2b; border-right: 1px solid #1e1e1e; }
+            QScrollArea { background: transparent; border: none; }
+            QScrollArea > QWidget > QWidget { background: transparent; }
+            QScrollBar:vertical {
+                background: transparent; width: 8px; margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #4a4a4a; border-radius: 4px; min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover { background: #5c5c5c; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
             QLabel { color: #ffffff; font-size: 18px; font-weight: bold; }
             QPushButton {
                 background-color: #0d6efd; color: white; border: none; padding: 10px;
-                border-radius: 5px; font-size: 14px; margin: 5px 10px;
+                border-radius: 5px; font-size: 14px; margin: 4px 8px;
             }
             QPushButton:hover { background-color: #0b5ed7; }
             QPushButton:disabled { background-color: #5c636a; color: #ced4da; }
@@ -1710,17 +1902,36 @@ class AutoLabelingApp(QMainWindow):
             QPushButton#trainBtn:hover { background-color: #0c7071; }
             QComboBox {
                 background-color: #3b3b3b; color: white; border: 1px solid #555;
-                padding: 5px; border-radius: 3px; font-size: 14px; margin: 5px 10px;
+                padding: 5px; border-radius: 3px; font-size: 14px; margin: 4px 8px;
             }
             QComboBox::drop-down { border: 0px; }
             QLineEdit {
                 background-color: #3b3b3b; color: white; border: 1px solid #555;
-                padding: 6px; border-radius: 3px; font-size: 14px; margin: 5px 10px;
+                padding: 6px; border-radius: 3px; font-size: 14px; margin: 4px 8px;
             }
         """)
 
-        sidebar_layout = QVBoxLayout(sidebar_frame)
-        sidebar_layout.setContentsMargins(10, 20, 10, 20)
+        sidebar_outer = QVBoxLayout(sidebar_frame)
+        sidebar_outer.setContentsMargins(0, 0, 0, 0)
+        sidebar_outer.setSpacing(0)
+
+        # The controls scroll. Every addition to the pipeline used to squeeze the
+        # column until the lower buttons were clipped and then invisible, and
+        # enlarging the window did not help because the sidebar is a fixed width
+        # and the shortfall is vertical. Scrolling means the next button costs
+        # nothing rather than costing the last one.
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        sidebar_content = QWidget()
+        sidebar_layout = QVBoxLayout(sidebar_content)
+        sidebar_layout.setContentsMargins(8, 16, 8, 12)
+        sidebar_scroll.setWidget(sidebar_content)
+        # Stretch 1 so the spare height goes to the scrolling controls rather than
+        # to the dataset panel pinned below them.
+        sidebar_outer.addWidget(sidebar_scroll, 1)
 
         logo_label = QLabel("Auto Labeling")
         logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1808,6 +2019,12 @@ class AutoLabelingApp(QMainWindow):
 
         sidebar_layout.addStretch()
 
+        # Pinned below the scroll area rather than inside it. It is the one thing
+        # here that is read rather than clicked, and a number that has to be
+        # scrolled to is a number nobody looks at.
+        self.dataset_panel = DatasetPanel()
+        sidebar_outer.addWidget(self.dataset_panel, 0)
+
         splitter = QSplitter(Qt.Orientation.Vertical)
 
         self.canvas = ZoomableGraphicsView()
@@ -1882,6 +2099,7 @@ class AutoLabelingApp(QMainWindow):
         else:
             self.append_log(f"\n[*] Editing labels for {stem}\n")
         LabelEditorDialog(file_path, label_path, parent=self).exec()
+        self.dataset_panel.refresh()
 
         # The canvas may be showing this same frame with the boxes as they were.
         if self.current_image_path == file_path:
@@ -2056,6 +2274,7 @@ class AutoLabelingApp(QMainWindow):
 
         self.set_buttons_state(True)
         self.update_review_badge()
+        self.dataset_panel.refresh()
 
     def refresh_class_combo(self):
         """Rebuild the class dropdown from data/classes.json, preserving the selection.
@@ -2091,6 +2310,7 @@ class AutoLabelingApp(QMainWindow):
         """Open the class editor and refresh anything that depends on the classes."""
         ClassManagerDialog(self).exec()
         self.refresh_class_combo()
+        self.dataset_panel.refresh()
         if self.current_image_path:
             self.canvas.load_image(self.current_image_path)
 
@@ -2109,6 +2329,7 @@ class AutoLabelingApp(QMainWindow):
         dialog = ReviewQueueDialog(self)
         dialog.exec()
         self.update_review_badge()
+        self.dataset_panel.refresh()
 
     def update_review_badge(self):
         """Show the number of pending reviews on the Review Queue button."""
