@@ -14,7 +14,7 @@ from PyQt6.QtGui import QImage
 from PyQt6.QtWidgets import QMessageBox, QPushButton
 
 from src.core.yolo_format import read_yolo_boxes, write_yolo_boxes
-from src.gui.app import ReviewQueueDialog
+from src.gui.app import SORT_SCORE_DESC, ReviewQueueDialog
 
 
 @pytest.fixture
@@ -455,3 +455,34 @@ def test_bulk_reject_removes_every_label(dialog, monkeypatch):
     for entry in entries.values():
         assert not os.path.exists(entry["label_path"])
         assert not os.path.exists(entry["mask_path"])
+
+
+def test_the_queue_opens_least_confident_first(dialog):
+    """A frame the model scored 0.89 teaches it nothing; the 0.81 does.
+
+    This tool's own experience is that correcting what the model found hard is
+    what makes the next model better, so the default order has to be the useful
+    one rather than the flattering one. It used to open on the highest score.
+
+    Args:
+        dialog: The review dialog and its entries.
+    """
+    dlg, _ = dialog
+
+    assert dlg._order == ["c", "b", "a"]
+
+
+def test_the_sort_choices_are_read_by_name_not_by_row(dialog):
+    """Reordering the dropdown must not silently change what a position sorts by.
+
+    The old code keyed on currentIndex, so moving an entry in the list would have
+    reversed the order without touching the sorting code at all.
+
+    Args:
+        dialog: The review dialog and its entries.
+    """
+    dlg, _ = dialog
+
+    dlg.sort_combo.setCurrentIndex(dlg.sort_combo.findData(SORT_SCORE_DESC))
+
+    assert dlg._order == ["a", "b", "c"]

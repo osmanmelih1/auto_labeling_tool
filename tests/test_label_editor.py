@@ -342,3 +342,47 @@ def test_emptying_a_frame_leaves_an_empty_label(editor):
     view.delete_selected()
 
     assert read_yolo_boxes(label_path) == []
+
+
+def test_confirming_empty_clears_the_frame_in_one_action(editor):
+    """Deleting boxes one at a time was the only way to reach this state."""
+    view, label_path = editor
+
+    assert view.confirm_empty() is True
+
+    assert view.boxes == []
+    assert read_yolo_boxes(label_path) == []
+
+
+def test_confirming_empty_writes_a_file_for_a_frame_that_had_none(qapp, make_frame, tmp_path):
+    """This is the case with no button: nothing to delete, and nothing recorded.
+
+    A frame with no label file is skipped by every step as unvisited, so the
+    decision that it holds nothing was being made and then lost. An empty file is
+    what turns it into a background image at export.
+
+    Args:
+        qapp: The shared QApplication.
+        make_frame: Factory writing an image and a label file.
+        tmp_path: Pytest's temporary directory.
+    """
+    image_path, _ = make_frame("blank", [], size=IMAGE_SIZE)
+    label_path = tmp_path / "never_labelled.txt"
+
+    view = LabelEditorView()
+    assert view.load(image_path, str(label_path)) is True
+    assert not label_path.exists()
+
+    assert view.confirm_empty() is True
+
+    assert label_path.exists()
+    assert read_yolo_boxes(str(label_path)) == []
+
+
+def test_confirming_empty_before_anything_is_loaded_does_nothing(qapp):
+    """With no label file to write to there is no decision to record.
+
+    Args:
+        qapp: The shared QApplication.
+    """
+    assert LabelEditorView().confirm_empty() is False

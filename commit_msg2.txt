@@ -1,0 +1,38 @@
+fix: review the least confident first, and let a frame be confirmed empty here
+
+Two things the tool knew and did not do.
+
+The review queue opened on "Score: High → Low". This project's own note says to
+read it the other way: a frame the model already scored 0.95 teaches nobody
+anything, and correcting the ones it found hard is what makes the next model
+better. The default was the flattering order, which is also the fastest half hour
+and the least useful one. Least-confident-first is now first in the list and
+therefore the default, with a tooltip saying why so it does not look like an
+arbitrary choice.
+
+The sort now keys on a mode stored against each dropdown entry rather than on
+currentIndex. Keying on the row number meant reordering the list would have
+reversed the sorting without touching the sorting code, which is exactly the
+change being made here.
+
+Second, Edit Labels had no way to say a frame holds nothing. Deleting the last
+box wrote the empty file, so the state was reachable — but only from a frame that
+already had boxes. Opening a frame that never had a label file and finding
+nothing to draw left no record at all, and a frame with no label file is
+indistinguishable from one nobody has opened: every step skips it and it never
+exports. The decision was being made and then lost, and marking one meant
+creating the .txt by hand.
+
+LabelEditorView.confirm_empty writes it. The button asks first when there are
+boxes on screen, because confirming empty with work visible is either a mis-click
+or a decision to discard someone's labels and the two look identical from here.
+It disables itself once the frame is recorded empty rather than writing the same
+file twice.
+
+The status line now distinguishes the two states it used to conflate. "No boxes
+yet" and "Confirmed empty" read the same on screen and mean opposite things —
+one is a human saying there is nothing here, the other is a frame nobody has
+looked at.
+
+Five tests. Two on the ordering, three on confirming empty, including the case
+with no button: a frame whose label file does not exist yet.

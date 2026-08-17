@@ -91,6 +91,17 @@ from src.gui.label_editor import (  # noqa: E402
 )
 from src.gui.tool_catalog import TOOLS, Tool, build_command  # noqa: E402
 
+SORT_SCORE_ASC = "score_asc"
+SORT_SCORE_DESC = "score_desc"
+SORT_DATE_DESC = "date_desc"
+
+# Order matters: the first entry is what the review dialog opens on.
+SORT_MODES = [
+    ("Score: Low → High", SORT_SCORE_ASC),
+    ("Score: High → Low", SORT_SCORE_DESC),
+    ("Date: New → Old", SORT_DATE_DESC),
+]
+
 
 def open_folder(path: str) -> bool:
     """Open a directory in the system file browser.
@@ -676,12 +687,16 @@ class ReviewQueueDialog(QDialog):
         header_layout.addStretch()
 
         self.sort_combo = QComboBox()
-        self.sort_combo.addItems(
-            [
-                "Score: High → Low",
-                "Score: Low → High",
-                "Date: New → Old",
-            ]
+        # Least confident first, and first in the list so it is the default. This
+        # tool's own experience is that a frame scored 0.95 teaches nobody
+        # anything: correcting the ones the model found hard is what makes the
+        # next model better. The old default started at the top of the confidence
+        # range, which is the cheapest half hour and the least useful one.
+        for label, mode in SORT_MODES:
+            self.sort_combo.addItem(label, mode)
+        self.sort_combo.setToolTip(
+            "Least confident first is the default on purpose: a frame the model was "
+            "already sure about teaches it nothing."
         )
         self.sort_combo.currentIndexChanged.connect(self._populate_cards)
         header_layout.addWidget(self.sort_combo)
@@ -878,13 +893,16 @@ class ReviewQueueDialog(QDialog):
 
         entries = list(self.queue_data.get("pending", {}).values())
 
-        sort_mode = self.sort_combo.currentIndex()
-        if sort_mode == 0:
+        # Keyed by the combo's stored mode rather than its row number, so the
+        # order of the list can be changed without silently changing what each
+        # position sorts by.
+        mode = self.sort_combo.currentData()
+        if mode == SORT_SCORE_DESC:
             entries.sort(key=lambda e: e.get("score", 0), reverse=True)
-        elif sort_mode == 1:
-            entries.sort(key=lambda e: e.get("score", 0))
-        else:
+        elif mode == SORT_DATE_DESC:
             entries.sort(key=lambda e: e.get("flagged_at", ""), reverse=True)
+        else:
+            entries.sort(key=lambda e: e.get("score", 0))
 
         self.count_label.setText(f"{len(entries)} images pending review")
 
@@ -1406,6 +1424,27 @@ class LabelEditorDialog(QDialog):
         """)
         self.delete_btn.clicked.connect(lambda: self.editor.delete_selected())
         tool_row.addWidget(self.delete_btn)
+
+        # The review screen has had this since it was written; this editor did
+        # not, so marking a frame empty here meant creating the .txt by hand.
+        # Deleting the last box already wrote the empty file — the case with no
+        # button was the frame that never had a label file at all.
+        self.empty_btn = QPushButton("Confirm Empty")
+        self.empty_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.empty_btn.setToolTip(
+            "Records that there is nothing to label here. The frame then exports as a "
+            "background image instead of being skipped as unvisited."
+        )
+        self.empty_btn.setStyleSheet("""
+            QPushButton {
+                background-color:#3b3b3b; color:#dddddd; border:1px solid #555;
+                padding:5px 12px; border-radius:5px; font-size:12px;
+            }
+            QPushButton:hover { background-color:#2b4a34; }
+            QPushButton:disabled { color:#666666; border-color:#3a3a3a; }
+        """)
+        self.empty_btn.clicked.connect(self._confirm_empty)
+        tool_row.addWidget(self.empty_btn)
         tool_row.addStretch()
 
         hint = QLabel("keys: 1-9 class · Del remove · drag to move or resize · drag empty space to add")
@@ -1435,6 +1474,27 @@ class LabelEditorDialog(QDialog):
         # save button to forget and nothing a close can lose.
         self.editor.boxes_changed.connect(self._refresh_status)
 
+    def _confirm_empty(self):
+        """Write an empty label file for this frame, asking first if it holds boxes.
+
+        Confirming empty with boxes on screen is either a mis-click or a decision
+        to throw away work someone did, and the two look identical from here.
+        """
+        if self.editor.boxes:
+            answer = QMessageBox.question(
+                self,
+                "Discard these boxes?",
+                f"This frame has {len(self.editor.boxes)} box(es). Confirming it empty deletes "
+                "them and records the frame as holding nothing.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        self.editor.confirm_empty()
+        self._refresh_status()
+
     def _refresh_status(self):
         """Restate what the label file now holds, per class."""
         names = load_classes()
@@ -1442,12 +1502,37 @@ class LabelEditorDialog(QDialog):
         for box in self.editor.boxes:
             counts[box["class_id"]] = counts.get(box["class_id"], 0) + 1
 
+        # Enabled only where it changes something: a frame already recorded as
+        # empty does not need confirming twice, and a disabled button says that
+        # more clearly than a second identical write would.
+        self.empty_btn.setEnabled(bool(self.editor.boxes) or not self._recorded_empty())
+
         if not counts:
-            self.status_label.setText("No boxes. This frame will be exported as a confirmed-empty image.")
+            if self._recorded_empty():
+                self.status_label.setText(
+                    "Confirmed empty. This frame will be exported as a background image."
+                )
+            else:
+                self.status_label.setText(
+                    "No boxes yet. Draw one, or press 'Confirm Empty' to record that there is nothing here."
+                )
             return
 
         summary = "  ".join(f"{class_name(names, cid)} ×{n}" for cid, n in sorted(counts.items()))
         self.status_label.setText(f"Saved: {summary}")
+
+    def _recorded_empty(self) -> bool:
+        """Report whether an empty label file exists for this frame.
+
+        An empty file and no file at all read the same on screen and mean opposite
+        things: one is a human saying there is nothing here, the other is a frame
+        nobody has opened.
+
+        Returns:
+            bool: True if the label file exists and holds no boxes.
+        """
+        path = self.editor.label_path
+        return bool(path) and os.path.exists(path) and not self.editor.boxes
 
     def _on_selection(self, index: int):
         """Point the class dropdown and the delete button at the selected box.

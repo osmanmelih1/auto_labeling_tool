@@ -416,6 +416,36 @@ class LabelEditorView(QGraphicsView):
             self._restyle(index)
         self._commit("[-] Box deleted.")
 
+    def confirm_empty(self) -> bool:
+        """Record that this frame holds nothing worth labelling.
+
+        A frame with no boxes and no label file is indistinguishable from a frame
+        nobody has looked at yet, so it is skipped by every step and never
+        exported. Written as an empty label file it becomes a background image,
+        which raises precision at a small cost in recall — the right trade here,
+        and about half a second of work per frame.
+
+        Deleting the last box already produced this state. What did not was
+        opening a frame that never had a label file and finding nothing to draw,
+        which is the common case when the detector has fired on nothing.
+
+        Returns:
+            bool: True if the file was written; False when there is no file to
+            write to, which means nothing has been loaded.
+        """
+        if not self.label_path:
+            return False
+
+        for box in self.boxes:
+            self.scene.removeItem(box["item"])
+            self.scene.removeItem(box["tag"])
+        self.boxes = []
+        self.selected_index = -1
+        self.selection_changed.emit(-1)
+
+        self._commit("[+] Frame confirmed empty. It will export as a background image.")
+        return True
+
     def to_yolo(self) -> list[tuple[int, float, float, float, float]]:
         """Return every box in the format written to a label file.
 
