@@ -32,7 +32,7 @@ operator is a computer-vision engineer working on Windows with an RTX 3060
 
 ```
 uv run main.py                                   # the GUI
-uv run pytest                                    # 160 tests
+uv run pytest                                    # 206 tests
 uv run ruff format . && uv run ruff check .
 uv run python -m src.core.step5_export           # any step, by module path
 uv run python -m src.tools.audit_labels          # any tool, likewise
@@ -156,17 +156,23 @@ anything involving encodings or path separators.
 
 ## Current state
 
-834 frames labelled (104 confirmed empty), 766 boxes, six classes. Six training
-rounds; mAP50-95 0.685 → 0.856, review load 68% of frames → 7.4%. Roughly 2000 of
-5240 raw images are not yet ingested, but deduplication keeps only about a
+All 1159 deduplicated frames are labelled (162 confirmed empty), 1046 boxes, six
+classes. Nine training rounds; mAP50-95 0.684 → 0.858 at round 8, 0.807 at round
+9 on a validation set 36% larger. Review load 68% of frames → 3.5%. Roughly 2000
+of 5242 raw images are not yet ingested, but deduplication keeps only about a
 quarter of new frames, so the pool is saturating.
 
-Every class now clears 0.74 mAP50-95. The weakest is `duzensiz_istif` at 0.740
-with precision 0.484 — it over-fires, and it holds 25 boxes after cleaning.
+`docs/OVERVIEW.md` is the version of this written for someone outside the
+project: the numbers, the round-by-round table and the known weaknesses. Keep it
+current when the numbers move.
 
-**Read the per-class table, not the headline.** Several classes are measured on
-three to nine validation instances, so their numbers move on one box. The
+Class counts, which explain most of the per-class scores: `palet_3lu` 826,
+`palet_2li` 89, `koli` 57, `duzensiz_istif` 44, `elde_tasinan` 16, `palet_1li`
+14. **The 59:1 imbalance between the largest and smallest class is the dominant
+limit on the model**, and it is not fixable by labelling more of this footage —
+the frames do not contain single pallets in any quantity. It needs targeted
+collection or training-side oversampling.
+
+**Read the per-class table, not the headline.** Four of six classes are measured
+on three to eighteen validation instances, so their numbers move on one box. The
 direction across rounds is evidence; the third decimal place is not.
-
-Next: `audit_labels` with no `--class` filter, judged by `runs/train-8`. The
-cleaner model can see contradictions the dirty one agreed with.
