@@ -121,6 +121,56 @@ def test_every_line_reaches_the_console(qapp, monkeypatch):
     assert emitted == ["[*] one\n", "[+] two\n"]
 
 
+def test_tool_arguments_reach_the_command_line(qapp, monkeypatch):
+    """The steps take no arguments; the inspection tools take a class or --apply.
+
+    A dropped argument here is not an error but a silently different run — the
+    whole dataset audited instead of one class, or a report where a deletion was
+    asked for.
+
+    Args:
+        qapp: The shared QApplication.
+        monkeypatch: Used to capture the Popen arguments.
+    """
+    captured = []
+
+    class FakeProcess:
+        stdout = iter([])
+        returncode = 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: (captured.append(a[0]), FakeProcess())[1])
+
+    WorkerThread("src.tools.audit_labels", ["--class", "koli"]).run()
+
+    assert captured[0][-3:] == ["src.tools.audit_labels", "--class", "koli"]
+
+
+def test_a_step_with_no_arguments_is_launched_exactly_as_before(qapp, monkeypatch):
+    """Adding the argument list must not add an empty one to every step.
+
+    Args:
+        qapp: The shared QApplication.
+        monkeypatch: Used to capture the Popen arguments.
+    """
+    captured = []
+
+    class FakeProcess:
+        stdout = iter([])
+        returncode = 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: (captured.append(a[0]), FakeProcess())[1])
+
+    WorkerThread("src.core.step6_train").run()
+
+    assert captured[0][-1] == "src.core.step6_train"
+
+
 def test_a_failure_to_start_is_reported_rather_than_swallowed(qapp, monkeypatch):
     """A step that never starts must say so; silence reads as success.
 

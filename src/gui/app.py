@@ -22,8 +22,8 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QThread, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDesktopServices, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -89,6 +89,27 @@ from src.gui.label_editor import (  # noqa: E402
     padded_scene_rect,
     zoom_at_cursor,
 )
+from src.gui.tool_catalog import TOOLS, Tool, build_command  # noqa: E402
+
+
+def open_folder(path: str) -> bool:
+    """Open a directory in the system file browser.
+
+    The tools write their previews somewhere and then say so in a log line that
+    has already scrolled past. Opening the folder from the button that produced
+    it removes the step where the path is retyped — which is how forty-five
+    previews from the previous day were once read as the current run's output.
+
+    Args:
+        path: Directory to open, relative to the project root.
+
+    Returns:
+        bool: True if the directory existed and was handed to the file browser.
+    """
+    target = PROJECT_ROOT / path
+    if not target.is_dir():
+        return False
+    return QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
 
 class WorkerThread(QThread):
@@ -97,14 +118,18 @@ class WorkerThread(QThread):
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(int)
 
-    def __init__(self, module_name: str):
-        """Store the step to execute.
+    def __init__(self, module_name: str, arguments: list[str] | None = None):
+        """Store the step or tool to execute.
 
         Args:
             module_name: Dotted module path, e.g. ``src.core.step4_propagation``.
+            arguments: Command-line arguments for the module. Steps take none;
+                the inspection tools under src/tools take a class name, a limit
+                or an --apply flag.
         """
         super().__init__()
         self.module_name = module_name
+        self.arguments = list(arguments or [])
 
     def run(self):
         """Execute the step and emit each output line as it arrives."""
@@ -128,7 +153,7 @@ class WorkerThread(QThread):
             environment = {**os.environ, "PYTHONIOENCODING": "utf-8"}
 
             process = subprocess.Popen(
-                ["uv", "run", "python", "-m", self.module_name],
+                ["uv", "run", "python", "-m", self.module_name, *self.arguments],
                 cwd=str(PROJECT_ROOT),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -1671,6 +1696,222 @@ class ClassManagerDialog(QDialog):
         self.accept()
 
 
+class ToolsDialog(QDialog):
+    """Picks an inspection tool and the arguments to run it with.
+
+    The tools answer the questions asked between labelling rounds — is this class
+    dirty, what does it actually contain, where are more examples — and until now
+    they were reachable only from a terminal. That put a PowerShell prompt in the
+    middle of every session and, once, had the wrong output folder opened by hand.
+
+    The dialog runs nothing itself. It hands the chosen module and arguments back
+    to the main window, which launches them through the same worker thread the
+    pipeline steps use, so tool output arrives in the same console and the same
+    buttons are disabled while it runs.
+    """
+
+    def __init__(self, parent=None):
+        """Build the tool list.
+
+        Args:
+            parent: Parent widget.
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Tools")
+        self.setMinimumWidth(560)
+        # Tall enough that the first three cards are readable without scrolling.
+        # Opened at its minimum the dialog cut the third one mid-sentence, which
+        # reads as a rendering fault rather than as a list that continues.
+        self.resize(620, 760)
+        self.setStyleSheet("""
+            QDialog { background-color: #2b2b2b; }
+            QLabel { color: #e0e0e0; font-size: 12px; }
+            QLabel#toolName { color: #ffffff; font-size: 14px; font-weight: bold; }
+            QLabel#warning { color: #e0a458; font-size: 11px; }
+            QComboBox {
+                background-color: #3b3b3b; color: white; border: 1px solid #555;
+                padding: 4px; border-radius: 3px; font-size: 12px;
+            }
+            QPushButton {
+                background-color: #0d6efd; color: white; border: none; padding: 7px 14px;
+                border-radius: 4px; font-size: 12px;
+            }
+            QPushButton:hover { background-color: #0b5ed7; }
+            QPushButton#dangerBtn { background-color: #b02a37; }
+            QPushButton#dangerBtn:hover { background-color: #8b2029; }
+            QPushButton#openBtn { background-color: #6c757d; }
+            QPushButton#openBtn:hover { background-color: #5c636a; }
+            QFrame#toolCard { background-color: #232323; border: 1px solid #383838;
+                              border-radius: 6px; }
+        """)
+
+        self.command: tuple[str, list[str]] | None = None
+        self.class_names = load_classes()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        heading = QLabel(
+            "These inspect the dataset. None of them writes to data/labels — proposing is not labelling."
+        )
+        heading.setWordWrap(True)
+        heading.setStyleSheet("color:#9fb8d4; font-size:11px;")
+        layout.addWidget(heading)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 8, 0)
+        container_layout.setSpacing(10)
+        for tool in TOOLS:
+            container_layout.addWidget(self._build_card(tool))
+        container_layout.addStretch()
+
+        scroll.setWidget(container)
+        layout.addWidget(scroll)
+
+        close_button = QPushButton("Close")
+        close_button.setObjectName("openBtn")
+        close_button.clicked.connect(self.reject)
+        footer = QHBoxLayout()
+        footer.addStretch()
+        footer.addWidget(close_button)
+        layout.addLayout(footer)
+
+    def _build_card(self, tool: Tool) -> QFrame:
+        """Draw one tool: what it does, what it needs, and how to start it.
+
+        Args:
+            tool: The tool to render.
+
+        Returns:
+            QFrame: The assembled card.
+        """
+        card = QFrame()
+        card.setObjectName("toolCard")
+        box = QVBoxLayout(card)
+        box.setContentsMargins(12, 10, 12, 12)
+        box.setSpacing(6)
+
+        name = QLabel(tool.label)
+        name.setObjectName("toolName")
+        box.addWidget(name)
+
+        blurb = QLabel(tool.blurb)
+        blurb.setWordWrap(True)
+        box.addWidget(blurb)
+
+        if tool.slow:
+            note = QLabel("Loads a model. Expect minutes, not seconds.")
+            note.setObjectName("warning")
+            box.addWidget(note)
+
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+
+        class_combo = None
+        if tool.class_argument:
+            class_combo = QComboBox()
+            # "All classes" first, except where the tool has nothing to do without
+            # one — searching for examples of every class at once is not a request
+            # anyone makes.
+            if not tool.class_required:
+                class_combo.addItem("All classes")
+            class_combo.addItems(self.class_names)
+            class_combo.setEnabled(bool(self.class_names) or not tool.class_required)
+            controls.addWidget(class_combo)
+
+        controls.addStretch()
+
+        if tool.output_dir:
+            open_button = QPushButton("Open output folder")
+            open_button.setObjectName("openBtn")
+            open_button.clicked.connect(lambda _, d=tool.output_dir: self._open_output(d))
+            open_button.setToolTip(f"Opens {tool.output_dir}")
+            controls.addWidget(open_button)
+
+        run_button = QPushButton("Report" if tool.destructive else "Run")
+        run_button.clicked.connect(lambda _, t=tool, c=class_combo: self._run(t, c, apply=False))
+        controls.addWidget(run_button)
+
+        if tool.destructive:
+            apply_button = QPushButton("Clear the project")
+            apply_button.setObjectName("dangerBtn")
+            apply_button.clicked.connect(lambda _, t=tool: self._run(t, None, apply=True))
+            controls.addWidget(apply_button)
+
+        box.addLayout(controls)
+        return card
+
+    def _open_output(self, directory: str) -> None:
+        """Open a tool's output folder, saying so when there is nothing there yet.
+
+        Args:
+            directory: Directory to open, relative to the project root.
+        """
+        if not open_folder(directory):
+            QMessageBox.information(
+                self,
+                "Nothing there yet",
+                f"{directory} does not exist. Run the tool first.",
+            )
+
+    def _chosen_class(self, tool: Tool, combo) -> str | None:
+        """Read the class selection, treating "All classes" as no filter.
+
+        Args:
+            tool: The tool being run.
+            combo: The tool's class dropdown, or None if it takes no class.
+
+        Returns:
+            str | None: The chosen class name, or None for all classes.
+        """
+        if combo is None:
+            return None
+        name = combo.currentText()
+        if not tool.class_required and name == "All classes":
+            return None
+        return name or None
+
+    def _run(self, tool: Tool, combo, apply: bool) -> None:
+        """Record the command and close, letting the main window launch it.
+
+        Args:
+            tool: The tool to run.
+            combo: Its class dropdown, or None.
+            apply: Whether a destructive tool should act rather than report.
+        """
+        if apply and tool.destructive:
+            # The dry run is one click away and this is not, because the thing
+            # being deleted includes the trained checkpoint that the whole
+            # pipeline exists to produce.
+            confirm = QMessageBox.question(
+                self,
+                "Clear this project?",
+                "This deletes every image, label, embedding, exported dataset and training "
+                "run under data/ and runs/. Model weights are kept.\n\n"
+                "Have you copied the trained checkpoint out of runs/ already?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+
+        try:
+            arguments = build_command(tool, self._chosen_class(tool, combo), apply=apply)
+        except ValueError as e:
+            QMessageBox.warning(self, "Nothing to run", str(e))
+            return
+
+        self.command = (tool.module, arguments)
+        self.accept()
+
+
 class DatasetPanel(QFrame):
     """A standing count of what the dataset holds, per class.
 
@@ -1900,6 +2141,8 @@ class AutoLabelingApp(QMainWindow):
             QPushButton#exportBtn:hover { background-color: #5a32a3; }
             QPushButton#trainBtn { background-color: #0f8b8d; }
             QPushButton#trainBtn:hover { background-color: #0c7071; }
+            QPushButton#toolsBtn { background-color: #495057; }
+            QPushButton#toolsBtn:hover { background-color: #3d4348; }
             QComboBox {
                 background-color: #3b3b3b; color: white; border: 1px solid #555;
                 padding: 5px; border-radius: 3px; font-size: 14px; margin: 4px 8px;
@@ -2016,6 +2259,14 @@ class AutoLabelingApp(QMainWindow):
         self.btn_predict.clicked.connect(lambda: self.run_script("src.core.step7_predict"))
         sidebar_layout.addWidget(self.btn_predict)
         self.buttons.append(self.btn_predict)
+
+        # Unnumbered on purpose: these are not a stage of the pipeline, they are
+        # what gets consulted between stages.
+        self.btn_tools = QPushButton("Tools")
+        self.btn_tools.setObjectName("toolsBtn")
+        self.btn_tools.clicked.connect(self.open_tools)
+        sidebar_layout.addWidget(self.btn_tools)
+        self.buttons.append(self.btn_tools)
 
         sidebar_layout.addStretch()
 
@@ -2222,11 +2473,13 @@ class AutoLabelingApp(QMainWindow):
         self.log_textbox.setTextCursor(cursor)
         self.log_textbox.ensureCursorVisible()
 
-    def run_script(self, module_name: str):
-        """Launch a pipeline step, writing any prompt file it depends on first.
+    def run_script(self, module_name: str, arguments: list[str] | None = None):
+        """Launch a pipeline step or inspection tool, writing any prompt file first.
 
         Args:
-            module_name: Dotted module path of the step to execute.
+            module_name: Dotted module path of the module to execute.
+            arguments: Command-line arguments. Steps take none; the tools take a
+                class name or an --apply flag.
         """
         if "step3a" in module_name:
             prompt_text = self.prompt_input.text().strip()
@@ -2252,11 +2505,14 @@ class AutoLabelingApp(QMainWindow):
                 )
             self.append_log(f"[*] Prompt saved for Step 3a: '{prompt_text}'\n")
 
+        arguments = list(arguments or [])
+        shown = " ".join([module_name, *arguments])
+
         self.append_log(f"\n[{'=' * 40}]\n")
-        self.append_log(f"[*] Executing: {module_name}\n")
+        self.append_log(f"[*] Executing: {shown}\n")
 
         self.set_buttons_state(False)
-        self.worker = WorkerThread(module_name)
+        self.worker = WorkerThread(module_name, arguments)
         self.worker.log_signal.connect(self.append_log)
         self.worker.finished_signal.connect(self.on_script_finished)
         self.worker.start()
@@ -2323,6 +2579,17 @@ class AutoLabelingApp(QMainWindow):
         if not self.class_combo.isEnabled():
             return None
         return self.class_combo.currentIndex()
+
+    def open_tools(self):
+        """Open the tool picker and run whatever it chose.
+
+        The dialog closes before the tool starts, so its output streams into the
+        main console rather than into a window that is about to be dismissed.
+        """
+        dialog = ToolsDialog(self)
+        if dialog.exec() and dialog.command:
+            module, arguments = dialog.command
+            self.run_script(module, arguments)
 
     def open_review_queue(self):
         """Open the review dialog and refresh the badge when it closes."""

@@ -60,6 +60,13 @@ labelling, and a tool that quietly relabelled would be worse than no tool. The
 exception is `new_project`, which deletes rather than proposes and therefore
 does nothing without `--apply`.
 
+The GUI's **Tools** button launches most of them through the same worker thread
+the steps use, so their output lands in the same console. What it may launch and
+how it calls them is `src/gui/tool_catalog.py`, which repeats their module paths
+and output directories as plain strings rather than importing them — importing
+`find_class_examples` or `gpu_check` would pull `torch` into the GUI process. A
+test compares the copies against the tools' own constants.
+
 ## Starting another project
 
 Nothing in the source is tied to a dataset — classes live in
