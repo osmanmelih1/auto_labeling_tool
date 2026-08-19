@@ -2178,6 +2178,9 @@ class AutoLabelingApp(QMainWindow):
         self.resize(1100, 800)
         self.current_image_path = None
         self.pending_boxes: list[dict] = []
+        # Held so the finished handler can ask which module it was, and declared
+        # here so that question does not depend on a run having happened.
+        self.worker: WorkerThread | None = None
         self.setup_ui()
         self.refresh_class_combo()
         self.update_review_badge()
@@ -2603,7 +2606,7 @@ class AutoLabelingApp(QMainWindow):
         self.worker.start()
 
     def on_script_finished(self, returncode):
-        """Re-enable the UI and refresh the queue badge once a step exits.
+        """Re-enable the UI and refresh whatever the step just changed.
 
         Args:
             returncode: Process exit code, zero on success.
@@ -2613,9 +2616,26 @@ class AutoLabelingApp(QMainWindow):
         else:
             self.append_log(f"\n[!] Process ended with error code: {returncode}\n")
 
+        module = self.worker.module_name if self.worker else ""
+
         self.set_buttons_state(True)
         self.update_review_badge()
         self.dataset_panel.refresh()
+
+        # The seeding steps write a label for the frame that is on the canvas, and
+        # the canvas went on showing the state before the run. The only way to see
+        # what SAM had produced was to reload the image by hand, so the button that
+        # matters most for trusting the step gave no visible answer at all — and
+        # this is the step where an unnoticed mistake costs the most, since Step 4
+        # turns these labels into prototypes and propagates them.
+        if returncode == 0 and self.current_image_path and ("step3a" in module or "step3b" in module):
+            self.canvas.load_image(self.current_image_path)
+            self.load_existing_boxes()
+            self.canvas.setFocus()
+            self.append_log(
+                "[*] The canvas now shows what the step wrote. Use 'Edit Labels' to correct it,\n"
+                "    or draw again and re-run the step to replace it.\n"
+            )
 
     def refresh_class_combo(self):
         """Rebuild the class dropdown from data/classes.json, preserving the selection.

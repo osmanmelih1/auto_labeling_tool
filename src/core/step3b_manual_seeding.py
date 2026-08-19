@@ -26,11 +26,19 @@ import numpy as np
 
 from src.core.class_config import class_name, load_classes
 from src.core.sam_engine import SamEngine, mask_to_yolo_box
+from src.core.yolo_format import box_area, iou, read_yolo_boxes
 
 SEED_FILE = "data/temp_seed.json"
 SAM_MODEL_PATH = "data/models/sam_vit_b_01ec64.pth"
 LABEL_DIR = "data/labels"
 MASK_DIR = "data/masks"
+
+# Below this overlap between the drawn box and the box SAM returned, the mask is
+# probably not of the object that was asked for. Refinement is expected to move
+# the edges — a rough rectangle around a pallet legitimately tightens to two
+# thirds of its area — so the bar is set where "tightened" stops being a
+# plausible description of the difference.
+BOX_AGREEMENT_WARNING = 0.35
 
 
 def read_seed_file(path: str = SEED_FILE) -> tuple[str, list[dict]] | None:
@@ -126,6 +134,31 @@ def main() -> None:
         combined_mask |= mask.astype(np.uint8)
         print(f"  [+] Box {i}: {class_name(names, class_id):16} SAM confidence {score:.4f}")
 
+        # SAM reports how sure it is of the mask it drew, not whether that mask is
+        # the object that was asked for. It answers a confident 0.98 having
+        # segmented the floor the pallet stands on. What catches that is the
+        # comparison the confidence cannot make: how far the returned box sits
+        # from the one the operator drew.
+        height, width = image.shape[:2]
+        drawn = (
+            (x + w / 2) / width,
+            (y + h / 2) / height,
+            w / width,
+            h / height,
+        )
+        agreement = iou(drawn, (xc, yc, nw, nh))
+        growth = box_area((xc, yc, nw, nh)) / max(box_area(drawn), 1e-9)
+        print(
+            f"            tightened to {box_area((xc, yc, nw, nh)):.1%} of the frame "
+            f"({growth:.2f}x your box, overlap {agreement:.2f})"
+        )
+        if agreement < BOX_AGREEMENT_WARNING:
+            print(
+                f"      [!] Box {i}: SAM's mask barely overlaps the box you drew. It has probably "
+                "\n          segmented something else — check this seed before running Step 4, "
+                "\n          because a wrong seed propagates to every similar frame."
+            )
+
     if not lines:
         print("[!] No usable masks were produced, so no label was written.")
         return
@@ -134,6 +167,21 @@ def main() -> None:
 
     os.makedirs(LABEL_DIR, exist_ok=True)
     label_path = os.path.join(LABEL_DIR, f"{base_name}.txt")
+
+    # The whole frame is rewritten, because labelling one object in a frame that
+    # holds three would teach the detector that the other two are background. That
+    # makes the write destructive: whatever the file held is gone. The GUI stages
+    # the existing boxes into the seed file when a labelled frame is opened, so the
+    # usual case is that they are all still here — but if the count drops, the
+    # operator should hear about it rather than discover it later.
+    previous = len(read_yolo_boxes(label_path))
+    if previous > len(lines):
+        print(
+            f"[!] {base_name}.txt held {previous} box(es) and now holds {len(lines)}."
+            "\n    This step rewrites the whole frame. If boxes went missing, load the image"
+            "\n    again so the existing ones are staged before re-running."
+        )
+
     with open(label_path, "w") as f:
         f.writelines(lines)
     print(f"[+] {len(lines)} seed label(s) saved to: {label_path}")
